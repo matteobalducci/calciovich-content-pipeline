@@ -256,3 +256,55 @@ def test_pending_without_progress_is_cleared_as_never_started(path):
     fresh.reconcile(probe)
     assert "ep1.mp4" not in fresh.data
     assert not fresh.already_handled("ep1.mp4", source_id="s1")
+
+
+# --- concorrenza: il motivo per cui il registro non e' piu' JSON ----------
+
+
+def test_two_processes_do_not_lose_each_others_updates(path):
+    """Il difetto che la migrazione a SQLite chiude.
+
+    Con i file JSON due processi leggevano l'intero registro, lo modificavano e
+    lo riscrivevano: la sostituzione era atomica ma NON serializzata, quindi
+    l'ultimo a scrivere cancellava l'aggiornamento dell'altro. Qui due Registry
+    aperti in parallelo scrivono chiavi diverse e devono sopravvivere entrambe.
+    """
+    a = Registry(path)
+    b = Registry(path)
+
+    a.begin("uno.mp4", source_id="s1")
+    b.begin("due.mp4", source_id="s2")      # b non conosceva 'uno'
+    a.confirm("uno.mp4", "id-1")
+    b.confirm("due.mp4", "id-2")
+
+    finale = Registry(path).data
+    assert set(finale) == {"uno.mp4", "due.mp4"}, "un aggiornamento e' andato perso"
+    assert finale["uno.mp4"]["external_id"] == "id-1"
+    assert finale["due.mp4"]["external_id"] == "id-2"
+
+
+def test_interleaved_writers_on_the_same_key_keep_the_last_state(path):
+    a = Registry(path)
+    b = Registry(path)
+    a.begin("ep1.mp4", source_id="s1")
+    b.progress("ep1.mp4", containerId="c-1")
+    a.confirm("ep1.mp4", "media-9")
+
+    rec = Registry(path).data["ep1.mp4"]
+    assert rec["state"] == CONFIRMED
+    assert rec["external_id"] == "media-9"
+    assert rec["containerId"] == "c-1", "progress di un altro processo non deve sparire"
+
+
+def test_legacy_json_is_imported_once_and_left_as_backup(path):
+    with open(path, "w") as fh:
+        json.dump({"vecchio.mp4": {"videoId": "v1", "source_id": "s9"}}, fh)
+
+    reg = Registry(path)
+    assert reg.already_handled("vecchio.mp4")
+    assert os.path.exists(path), "il JSON deve restare come backup"
+
+    # una seconda apertura non deve reimportare ne' duplicare
+    reg.confirm("nuovo.mp4", "v2")
+    again = Registry(path)
+    assert set(again.data) == {"vecchio.mp4", "nuovo.mp4"}

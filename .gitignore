@@ -45,3 +45,8 @@ rotation-state.json
 *.jpg
 *.jpeg
 !docs/**/*.png
+
+# stato di pubblicazione (SQLite) — runtime, non versionato
+*.db
+*.db-wal
+*.db-shm

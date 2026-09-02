@@ -35,7 +35,8 @@ try:
 except Exception:
     TZ = None  # fallback: si usa l'ora locale di sistema
 
-import upload_registry  # registro crash-safe condiviso fra i publisher
+import upload_registry  # stato di pubblicazione condiviso (SQLite)
+from publish_attempt import AlreadySettled, KnownFailure, PublishAttempt, classify
 
 HERE = os.path.dirname(os.path.abspath(__file__))                 # .../08-video-engine
 DATA = os.path.join(HERE, "app", "data.json")
@@ -380,36 +381,35 @@ def main():
         for i, p in enumerate(plan, 1):
             print(f"⬆️  [{i}/{len(plan)}] {p['key']} …")
 
-            # SCRITTURA DELL'INTENZIONE, prima dell'effetto esterno. Se il processo
-            # muore fra qui e la conferma, il record pending dice alla run successiva
-            # che l'esito è ignoto e va verificato, invece di far ripartire l'upload.
-            registry.begin(
-                p["key"],
-                source_id=p.get("source_id"),
-                title=p["title"],
-                publishAt=p["publishAt"],
-                privacy=("private" if p["publishAt"] else args.privacy),
-            )
+            # Il protocollo write-ahead sta tutto in PublishAttempt: intenzione
+            # prima dell'effetto esterno, e alla fine confirmed / failed / pending
+            # a seconda di cosa e' successo. Vedi publish_attempt.py.
             try:
-                vid = upload_one(youtube, p, args)
+                with PublishAttempt(registry, p["key"], source_id=p.get("source_id"),
+                                    title=p["title"], publishAt=p["publishAt"],
+                                    privacy=("private" if p["publishAt"] else args.privacy)) as attempt:
+                    try:
+                        vid = upload_one(youtube, p, args)
+                    except Exception as e:
+                        # La quota esaurita e' un fallimento NOTO: la chiamata non
+                        # e' partita, quindi l'item puo' tornare disponibile.
+                        raise (KnownFailure(str(e)) if "quota" in str(e).lower()
+                               else classify(e)) from e
+                    url = f"https://youtu.be/{vid}"
+                    attempt.succeeded(vid, videoId=vid, url=url,
+                                      uploadedAt=datetime.now().isoformat())
+            except AlreadySettled:
+                print("  ⏭  gia' preso in carico da un'altra esecuzione, salto.")
+                continue
             except Exception as e:
                 msg = str(e)
                 print(f"  ❌ errore: {msg[:200]}")
                 failures.append((p["key"], msg[:200]))
                 if "quota" in msg.lower():
-                    # Quota esaurita: l'upload non è partito, quindi è un fallimento
-                    # NOTO e l'item può tornare disponibile.
-                    registry.fail(p["key"], msg)
                     print("  Quota giornaliera esaurita: riprova domani o richiedi aumento quota.")
                     break
-                # Ogni altro errore può essere un timeout su un upload andato a buon
-                # fine: si lascia pending di proposito, e sarà la riconciliazione a
-                # decidere alla prossima run.
-                print("  ↪︎ lasciato in sospeso: la prossima esecuzione verificherà su YouTube.")
+                print("  ↪︎ lasciato in sospeso: la prossima esecuzione verifichera' su YouTube.")
                 continue
-            url = f"https://youtu.be/{vid}"
-            registry.confirm(p["key"], vid, videoId=vid, url=url,
-                             uploadedAt=datetime.now().isoformat())
             any_uploaded = True
             print(f"  ✓ caricato: {url}" + (f"  → pubblica il {p['publishAt']}" if p["publishAt"] else " (privato)"))
 

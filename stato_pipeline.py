@@ -31,11 +31,35 @@ def _load_queue_items():
 
 
 def _ig_published_ids():
+    """Solo cio' che e' DAVVERO pubblicato.
+
+    BUGFIX 02/09 (audit Codex): il cruscotto contava come pubblicato qualunque
+    record presente nel registro, inclusi i 'pending' (esito ignoto) e i
+    'failed' (da ritentare). Nascondeva quindi proprio gli item che avevano
+    bisogno di attenzione.
+    """
     try:
-        keys = json.load(open(IG_UPLOADS_PATH, encoding="utf-8")).keys()
-        return {k.split("-")[0] for k in keys}
+        import upload_registry
+        reg = upload_registry.Registry(IG_UPLOADS_PATH)
+        ids = {k.split("-")[0] for k, v in reg.data.items()
+               if upload_registry.state_of(v) == upload_registry.CONFIRMED}
+        reg.close()
+        return ids
     except Exception:
         return set()
+
+
+def _ig_needs_attention():
+    """Item bloccati in pending o falliti, che il cruscotto deve mostrare."""
+    try:
+        import upload_registry
+        reg = upload_registry.Registry(IG_UPLOADS_PATH)
+        out = {k: upload_registry.state_of(v) for k, v in reg.data.items()
+               if upload_registry.state_of(v) != upload_registry.CONFIRMED}
+        reg.close()
+        return out
+    except Exception:
+        return {}
 
 
 def _known_issues():

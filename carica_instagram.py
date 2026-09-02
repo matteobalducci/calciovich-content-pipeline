@@ -39,7 +39,8 @@ OPZIONI principali: --limit N (default 5) · --force (ripubblica anche se già
 import os, sys, re, json, time, argparse, mimetypes, fcntl, contextlib
 import urllib.request, urllib.parse, urllib.error
 
-import upload_registry  # registro crash-safe condiviso fra i publisher
+import upload_registry  # stato di pubblicazione condiviso (SQLite)
+from publish_attempt import AlreadySettled, PublishAttempt, classify
 
 HERE = os.path.dirname(os.path.abspath(__file__))                 # .../08-video-engine
 DATA = os.path.join(HERE, "app", "data.json")
@@ -316,29 +317,42 @@ def publish_photo(args):
     if not os.path.exists(path):
         sys.exit(f"Foto non trovata: {path}")
     key = f"photos/{os.path.splitext(os.path.basename(path))[0]}.jpg"
-    print("    …upload su R2")
-    image_url = upload_to_r2(cfg, path, key)
-    try:
-        print("    …creo container foto")
-        resp = graph_request(f"{ig_user_id}/media", {
-            "image_url": image_url,
-            "caption": args.caption or "",
-            "access_token": access_token,
-        })
-        container_id = resp["id"]
-        wait_container_ready(container_id, access_token, timeout=120)
-        print("    …pubblico")
-        media_id = publish_container(ig_user_id, container_id, access_token)
-    finally:
-        if not args.keep_r2:
-            try: delete_from_r2(cfg, key)
-            except Exception: pass
-    uploaded = load_uploads()
-    uploaded[os.path.basename(path)] = {
-        "mediaId": media_id, "type": "photo",
-        "publishedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    }
-    save_uploads(uploaded)
+
+    # BUGFIX 02/09 (audit Codex, secondo giro): la prima correzione usava
+    # begin()+confirm() a mano, senza salvare il containerId — quindi un pending
+    # non era riconciliabile e la riconciliazione lo cancellava come "mai
+    # iniziato", permettendo di ripubblicare la foto. Ora usa lo STESSO
+    # protocollo dei video, context manager compreso.
+    registry = upload_registry.Registry(UPLOADS)
+    if registry.claim(key, source_id=None, type="photo",
+                      caption=(args.caption or "")[:200]) is None:
+        print(f"  ⚠️  '{key}' risulta gia' gestita: salto (cancella il record per forzare).")
+        return 0
+
+    with PublishAttempt(registry, key, type="photo",
+                        caption=(args.caption or "")[:200]) as attempt:
+        try:
+            print("    …upload su R2")
+            image_url = upload_to_r2(cfg, path, key)
+            print("    …creo container foto")
+            resp = graph_request(f"{ig_user_id}/media", {
+                "image_url": image_url,
+                "caption": args.caption or "",
+                "access_token": access_token,
+            })
+            container_id = resp["id"]
+            attempt.record(containerId=container_id)
+            wait_container_ready(container_id, access_token, timeout=120)
+            print("    …pubblico")
+            media_id = publish_container(ig_user_id, container_id, access_token)
+        except Exception as e:
+            raise classify(e) from e
+        finally:
+            if not args.keep_r2:
+                try: delete_from_r2(cfg, key)
+                except Exception: pass
+        attempt.succeeded(media_id, mediaId=media_id, type="photo",
+                          publishedAt=time.strftime("%Y-%m-%dT%H:%M:%S"))
     print(f"  ✓ foto pubblicata: media id {media_id}")
 
 # ---------------------------------------------------------------- story
@@ -352,22 +366,39 @@ def publish_story(args):
     if not os.path.exists(path):
         sys.exit(f"File non trovato: {path}")
     is_video = path.lower().endswith((".mp4", ".mov"))
-    key = f"stories/{os.path.basename(path)}"
-    print("    …upload su R2")
-    media_url = upload_to_r2(cfg, path, key)
+    # La chiave include la data: una story si ripubblica di proposito ogni
+    # giorno, quindi la deduplica deve valere per GIORNATA, non per file.
+    key = f"stories/{time.strftime('%Y-%m-%d')}/{os.path.basename(path)}"
+
+    # BUGFIX 02/09: anche questo percorso scavalcava la macchina a stati — non
+    # registrava nulla, quindi un crash dopo publish_container ripubblicava la
+    # story. Trovato dal test strutturale, non a occhio.
+    registry = upload_registry.Registry(UPLOADS)
     try:
-        print("    …creo container story")
-        params = {"media_type": "STORIES", "access_token": access_token}
-        params["video_url" if is_video else "image_url"] = media_url
-        resp = graph_request(f"{ig_user_id}/media", params)
-        container_id = resp["id"]
-        wait_container_ready(container_id, access_token, timeout=300)
-        print("    …pubblico")
-        media_id = publish_container(ig_user_id, container_id, access_token)
-    finally:
-        if not args.keep_r2:
-            try: delete_from_r2(cfg, key)
-            except Exception: pass
+        with PublishAttempt(registry, key, type="story", is_video=is_video) as attempt:
+            try:
+                print("    …upload su R2")
+                media_url = upload_to_r2(cfg, path, key)
+                print("    …creo container story")
+                params = {"media_type": "STORIES", "access_token": access_token}
+                params["video_url" if is_video else "image_url"] = media_url
+                resp = graph_request(f"{ig_user_id}/media", params)
+                container_id = resp["id"]
+                attempt.record(containerId=container_id)
+                wait_container_ready(container_id, access_token, timeout=300)
+                print("    …pubblico")
+                media_id = publish_container(ig_user_id, container_id, access_token)
+            except Exception as e:
+                raise classify(e) from e
+            finally:
+                if not args.keep_r2:
+                    try: delete_from_r2(cfg, key)
+                    except Exception: pass
+            attempt.succeeded(media_id, mediaId=media_id, type="story",
+                              publishedAt=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    except AlreadySettled:
+        print(f"  ⏭  story gia' pubblicata oggi per '{os.path.basename(path)}', salto.")
+        return 0
     print(f"  ✓ story pubblicata: media id {media_id}")
 
 # ---------------------------------------------------------------- primo commento
@@ -443,37 +474,37 @@ def main():
         for i, p in enumerate(plan, 1):
             print(f"⬆️  [{i}/{len(plan)}] {p['key']} …")
             r2_key = f"reels/{p['key']}.mp4"
-            # Intenzione scritta PRIMA dell'effetto esterno: se il processo muore
-            # dopo publish_container ma prima della conferma, il record pending
-            # dice alla run successiva che l'esito e' ignoto invece di ripubblicare.
-            registry.begin(p["key"], source_id=p.get("source_id"), caption=p["caption"][:200])
             try:
-                print("    …upload su R2")
-                video_url = upload_to_r2(cfg, p["path"], r2_key)
-                print("    …creo container Instagram")
-                container_id = create_container(ig_user_id, video_url, p["caption"], access_token)
-                # Persistito SUBITO: e' l'appiglio per il recovery. Un pending che
-                # contiene solo l'intenzione non e' riconciliabile.
-                registry.progress(p["key"], containerId=container_id)
-                print("    …attendo elaborazione")
-                wait_container_ready(container_id, access_token)
-                print("    …pubblico")
-                media_id = publish_container(ig_user_id, container_id, access_token)
+                with PublishAttempt(registry, p["key"], source_id=p.get("source_id"),
+                                    caption=p["caption"][:200]) as attempt:
+                    try:
+                        print("    …upload su R2")
+                        video_url = upload_to_r2(cfg, p["path"], r2_key)
+                        print("    …creo container Instagram")
+                        container_id = create_container(ig_user_id, video_url, p["caption"], access_token)
+                        # Persistito SUBITO: e' l'unico appiglio del recovery.
+                        attempt.record(containerId=container_id)
+                        print("    …attendo elaborazione")
+                        wait_container_ready(container_id, access_token)
+                        print("    …pubblico")
+                        media_id = publish_container(ig_user_id, container_id, access_token)
+                    except Exception as e:
+                        raise classify(e) from e
+                    finally:
+                        if not args.keep_r2:
+                            try: delete_from_r2(cfg, r2_key)
+                            except Exception: pass
+                    attempt.succeeded(media_id, mediaId=media_id,
+                                      publishedAt=time.strftime("%Y-%m-%dT%H:%M:%S"))
+            except AlreadySettled:
+                print("  ⏭  gia' preso in carico da un'altra esecuzione, salto.")
+                continue
             except Exception as e:
                 msg = str(e)[:300]
                 print(f"  ❌ errore: {msg}")
                 failures.append((p["key"], msg))
-                # Non si chiama fail(): un errore qui puo' essere un timeout su
-                # una pubblicazione andata a buon fine. Resta pending, e resta
-                # bloccato, finche' non lo si verifica a mano su Instagram.
-                print("  ↪︎ lasciato in sospeso: verificare su Instagram prima di ritentare.")
+                print("  ↪︎ lasciato in sospeso: la prossima esecuzione verifichera' su Instagram.")
                 continue
-            finally:
-                if not args.keep_r2:
-                    try: delete_from_r2(cfg, r2_key)
-                    except Exception: pass
-            registry.confirm(p["key"], media_id, mediaId=media_id,
-                             publishedAt=time.strftime("%Y-%m-%dT%H:%M:%S"))
             print(f"  ✓ pubblicato: media id {media_id}")
         if failures:
             print(f"\n⚠️  {len(failures)} pubblicazioni non riuscite:")

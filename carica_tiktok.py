@@ -43,7 +43,8 @@ OPZIONI principali: --limit N (default 5) · --force (ripubblica anche se già
 import os, sys, re, json, time, argparse, webbrowser, secrets, fcntl, contextlib
 import urllib.request, urllib.parse, urllib.error
 
-import upload_registry  # registro crash-safe condiviso fra i publisher
+import upload_registry  # stato di pubblicazione condiviso (SQLite)
+from publish_attempt import AlreadySettled, PublishAttempt, classify
 
 HERE = os.path.dirname(os.path.abspath(__file__))                 # .../08-video-engine
 DATA = os.path.join(HERE, "app", "data.json")
@@ -420,40 +421,42 @@ def main():
             return 0
         for i, p in enumerate(plan, 1):
             print(f"⬆️  [{i}/{len(plan)}] {p['key']} …")
-            # Intenzione scritta PRIMA dell'effetto esterno.
-            registry.begin(p["key"], source_id=p.get("source_id"))
             try:
-                video_size = os.path.getsize(p["path"])
-                print("    …creo container")
-                publish_id, upload_url = init_upload(access_token, p["caption"], video_size, draft=args.draft)
-                # Il publish_id e' l'unico appiglio per il recovery: va persistito
-                # SUBITO, prima del caricamento. Un pending senza publish_id non e'
-                # riconciliabile e resterebbe bloccato per sempre.
-                registry.progress(p["key"], publishId=publish_id, draft=bool(args.draft))
-                print("    …carico il video")
-                upload_video(upload_url, p["path"], video_size)
-                print("    …attendo" + (" invio all'inbox" if args.draft else " pubblicazione"))
-                wait_publish_complete(access_token, publish_id, draft=args.draft)
+                with PublishAttempt(registry, p["key"], source_id=p.get("source_id")) as attempt:
+                    try:
+                        video_size = os.path.getsize(p["path"])
+                        print("    …creo container")
+                        publish_id, upload_url = init_upload(access_token, p["caption"],
+                                                            video_size, draft=args.draft)
+                        # Il publish_id e' l'unico appiglio del recovery: persistito
+                        # subito, prima del caricamento.
+                        attempt.record(publishId=publish_id, draft=bool(args.draft))
+                        print("    …carico il video")
+                        upload_video(upload_url, p["path"], video_size)
+                        print("    …attendo" + (" invio all'inbox" if args.draft else " pubblicazione"))
+                        wait_publish_complete(access_token, publish_id, draft=args.draft)
+                    except Exception as e:
+                        raise classify(e) from e
+                    # Il record distingue la CONSEGNA (avvenuta, non va rifatta)
+                    # dalla PUBBLICAZIONE, che per una bozza dipende dall'utente.
+                    attempt.succeeded(
+                        publish_id,
+                        publishId=publish_id,
+                        deliveredAt=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        delivery="inbox_draft" if args.draft else "direct_post",
+                        user_published=False if args.draft else True,
+                        privacy="DRAFT_INBOX" if args.draft else "SELF_ONLY",
+                        caption_bozza=p["caption"] if args.draft else None,
+                    )
+            except AlreadySettled:
+                print("  ⏭  gia' preso in carico da un'altra esecuzione, salto.")
+                continue
             except Exception as e:
                 msg = str(e)[:300]
                 print(f"  ❌ errore: {msg}")
                 failures.append((p["key"], msg))
-                # Resta pending: puo' essere un timeout su un invio riuscito.
-                print("  ↪︎ lasciato in sospeso: verificare su TikTok prima di ritentare.")
+                print("  ↪︎ lasciato in sospeso: la prossima esecuzione verifichera' su TikTok.")
                 continue
-            # BUGFIX 02/09: una bozza in inbox veniva registrata come pubblicata e
-            # deduplicata per sempre, anche se l'utente non l'avrebbe mai
-            # confermata dall'app. Il record ora distingue la CONSEGNA (avvenuta,
-            # quindi non va rifatta) dalla PUBBLICAZIONE (che dipende dall'utente).
-            registry.confirm(
-                p["key"], publish_id,
-                publishId=publish_id,
-                deliveredAt=time.strftime("%Y-%m-%dT%H:%M:%S"),
-                delivery="inbox_draft" if args.draft else "direct_post",
-                user_published=False if args.draft else True,
-                privacy="DRAFT_INBOX" if args.draft else "SELF_ONLY",
-                caption_bozza=p["caption"] if args.draft else None,
-            )
             if args.draft:
                 print(f"  ✓ inviato come bozza all'inbox TikTok: publish_id {publish_id} — completa la pubblicazione dall'app")
             else:
