@@ -1,0 +1,27 @@
+# Calciovich Content Pipeline — runtime dependencies
+# Python 3.11+ (uses zoneinfo from the standard library)
+#
+# Note: this repo is an extract and is not a runnable demo — it references a
+# private configuration/data layer that lives elsewhere. These are the packages
+# the scripts import, pinned to the majors they were developed against.
+
+# --- Google / YouTube (Data API v3 + Analytics API) ---
+google-api-python-client>=2.100
+google-auth>=2.23
+google-auth-oauthlib>=1.1
+
+# --- Object storage (Cloudflare R2, S3-compatible) ---
+boto3>=1.34
+
+# --- Media generation & assembly ---
+Pillow>=10.0
+imageio-ffmpeg>=0.4.9
+numpy>=1.26
+edge-tts>=6.1            # free neural voiceover
+
+# --- PDF / vector assets (certificates, plates) ---
+reportlab>=4.0
+svglib>=1.5
+
+# --- Optional: paid voice provider, only used when explicitly enabled ---
+elevenlabs>=1.0

@@ -1,19 +1,68 @@
 # Calciovich Content Pipeline
 
-Python scripts that run, on their own, the daily production and multi-platform
-publishing of video content for an independent transmedia project — a fictional
-character, a novel, and a YouTube/Instagram/TikTok channel built around it.
+**A production content system for three streaming platforms — and the instrumentation
+that turns its own output into a measurable dataset.**
 
-This repository is an extract from the project's private repo: only the pipeline
-code lives here, not the story, the private data, or any credentials.
+The pipeline runs unattended every day: it reads the state of a content queue, decides
+what to produce under a weekly rotation, generates the video, passes it through a
+visual quality gate, publishes it to YouTube, Instagram and TikTok, and updates
+registries, playlists and state as it goes. Orchestration is handled by an AI agent
+(Claude Code) driving the scripts in this repo.
 
-The system runs every day, orchestrated by an AI agent (Claude Code) that reads the
-current state of the content queue, decides what to produce according to a weekly
-rotation, generates the video, runs it through a visual quality check, and publishes
-it across all three platforms — updating registries, playlists, and state
-automatically as it goes.
+The part I care about most is the second half: **every release is measured.** A
+historical logger accumulates channel metrics with no retention cutoff, an outlier
+detector scores each new video against the rolling median of its own format, and a
+dashboard reads the resulting time series. The system is the source of its own
+analytics.
 
-## What the pipeline does
+> **Context.** This is the *upstream* half of a pair of projects on the same domain.
+> [Music Streaming Analytics](https://github.com/matteobalducci/music-streaming-analytics)
+> models streaming event data (star schema, dbt, Power BI) and
+> [Streaming Insights Copilot](https://github.com/matteobalducci/streaming-insights-copilot)
+> puts a natural-language query layer over it. This repo is where the events come
+> from.
+
+## Data flow
+
+```mermaid
+flowchart LR
+  Q["Content queue<br/>(private)"] --> P{"Planner<br/>piano.py · coach.py"}
+  P --> G["Generation<br/>video · images · voice · music"]
+  G --> A["Assembly<br/>make_video.py · overlays"]
+  A --> QC["Quality gate<br/>qc_video.py"]
+  QC --> PUB["Publishers<br/>YouTube · Instagram · TikTok"]
+  PUB --> M["Metrics logger<br/>aggiorna_youtube_stats.py"]
+  M --> TS[("Time series<br/>no retention cutoff")]
+  TS --> OUT["Outlier detection<br/>check_outliers.py"]
+  TS --> DASH["Dashboard<br/>app_server.py"]
+  OUT --> P
+  DASH --> P
+```
+
+The loop closes: measurement feeds back into what gets produced next.
+
+## Measurement layer
+
+- **`aggiorna_youtube_stats.py`** — historical logger for subscribers, views and
+  followers, running on a `LaunchAgent` schedule with **no retention cutoff**. Platform
+  APIs expose rolling windows; keeping the full series locally is what makes trend and
+  cohort analysis possible later.
+- **`check_outliers.py`** — compares each new release against the **rolling median of
+  its own format** (YouTube Analytics API) and flags outliers immediately (`WIN ≥5×`,
+  `FAIL ≤0.2×`). Per-format baselines matter: a short-form clip and a long-form episode
+  have distributions that can differ by two orders of magnitude, so a single global
+  threshold produces nothing but false signals.
+- **`app_server.py`** — local HTTP server backing a dashboard over pipeline state and
+  the accumulated metrics, regenerating its data on every start.
+
+**Design note on the alerting cadence.** Outlier detection is a *lightweight daily
+trigger*, deliberately not a replacement for a periodic review. It answers "is this one
+release obviously off the scale?" — a question worth answering within hours. Slower
+questions (is a format decaying? is the audience shifting?) need more observations and
+belong to a review on a fixed cadence. Conflating the two produces either alert fatigue
+or slow detection.
+
+## Production pipeline
 
 **Generation**
 - `genera_video_ai.py` — AI video clips (Seedance via PiAPI) with a consistently
@@ -39,9 +88,6 @@ automatically as it goes.
 **Quality control**
 - `qc_video.py` — a contact sheet of frames extracted at intervals, for a fast visual
   check of face consistency, camera work and brand compliance before publishing.
-- `check_outliers.py` — compares the view count of the latest video in each format
-  against that format's recent median (via the YouTube Analytics API) and flags
-  outliers (WIN ≥5×, FAIL ≤0.2×) immediately, without waiting for a periodic review.
 
 **Multi-platform publishing**
 - `carica_youtube.py` — upload with scheduled `publishAt`, tags/description/category,
@@ -55,14 +101,9 @@ automatically as it goes.
   formats once one supersedes the other in content coverage.
 - `rispondi_commenti.py` / `leggi_commenti.py` — comment-reply drafts in the
   character's voice, tuned per platform.
-- `aggiorna_youtube_stats.py` — a historical logger (subscribers/views/followers)
-  running via a LaunchAgent, with no retention cutoff — the seed data for future
-  analysis.
 
 **Orchestration**
 - `stato_pipeline.py` / `coach.py` / `piano.py` — queue status, goals and cadence.
-- `app_server.py` — a small local HTTP server backing a dashboard (pipeline status,
-  content roadmap, quick actions), regenerating its data on every start.
 
 ## Notable engineering decisions
 
@@ -76,9 +117,9 @@ automatically as it goes.
   available (already-paid-for content repurposed, free providers, local rendering)
   and reserves paid AI generation for the one format that must always be fresh —
   under a fixed spending cap and a hard retry limit per item.
-- **Lightweight trigger vs. periodic review**: `check_outliers.py` covers the "one
-  video is obviously off the scale" case on a daily basis, without replacing a
-  broader review done on a fixed cadence.
+- **Per-format baselines, not global thresholds**: performance is scored against the
+  rolling median of the same format, because formats differ in scale by orders of
+  magnitude and a shared threshold would only produce noise.
 
 ## Stack
 
@@ -87,9 +128,13 @@ Graph API · TikTok Content Posting API · Cloudflare R2 (S3-compatible, via bot
 PiAPI (Seedance/Seedream) · Pollinations · edge-tts · Pillow · ffmpeg (via
 imageio-ffmpeg)
 
-## Note
+## Repository scope
 
-This repository is a demonstration extract: the scripts reference a private
-configuration/data layer (credentials, content queue, editorial calendar) that isn't
-included here. It isn't meant to run standalone — it's here to show the architecture
-and implementation choices of the real production pipeline.
+This repo holds the pipeline code only. The system it belongs to also has a private
+half — credentials, the content queue, the editorial calendar, and the manuscript
+itself — which stays in a separate private repository. That split is deliberate: the
+engineering is worth showing, the content and the secrets are not.
+
+Consequently the scripts here reference a configuration/data layer that isn't included,
+and the repo is not a runnable demo. It documents the architecture and the
+implementation choices of a system that runs in production every day.
