@@ -187,7 +187,17 @@ def fetch_titles(yt, ids):
 
 
 def find_playlist(yt, title):
-    resp = yt.playlists().list(part="snippet", mine=True, maxResults=50).execute()
+    # BUGFIX 02/09: senza paginazione, oltre 50 playlist non si trovava quella
+    # esistente e se ne creava una DUPLICATA a ogni run.
+    items, page = [], None
+    while True:
+        resp = yt.playlists().list(part="snippet", mine=True, maxResults=50,
+                                   pageToken=page).execute()
+        items.extend(resp.get("items", []))
+        page = resp.get("nextPageToken")
+        if not page:
+            break
+    resp = {"items": items}
     for it in resp.get("items", []):
         if it["snippet"]["title"] == title:
             return it["id"]

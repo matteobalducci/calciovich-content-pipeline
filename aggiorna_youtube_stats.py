@@ -22,6 +22,8 @@ USO
 """
 import os, sys, json, time
 
+import upload_registry  # scrittura atomica del registro
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_PATH = os.path.join(HERE, "youtube_token.json")
 META_CONFIG_PATH = os.path.join(HERE, "meta_config.json")
@@ -89,7 +91,10 @@ def main():
     out["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
-    json.dump(out, open(OUT_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    # BUGFIX 02/09: json.dump su open(...,"w") tronca il file prima di scrivere.
+    # Due LaunchAgent sovrapposti, o un crash a meta', lasciavano una serie
+    # storica corrotta — e la serie storica non e' rigenerabile.
+    upload_registry.save(OUT_PATH, out)
     print(f"✓ {snapshot['subs']} iscritti · {snapshot['views']} views · {snapshot['videos']} video · "
           f"{ig_followers if ig_followers is not None else '?'} follower IG  -> {OUT_PATH}")
 

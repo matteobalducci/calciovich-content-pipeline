@@ -43,6 +43,8 @@ OPZIONI principali: --limit N (default 5) · --force (ripubblica anche se già
 import os, sys, re, json, time, argparse, webbrowser, secrets, fcntl, contextlib
 import urllib.request, urllib.parse, urllib.error
 
+import upload_registry  # registro crash-safe condiviso fra i publisher
+
 HERE = os.path.dirname(os.path.abspath(__file__))                 # .../08-video-engine
 DATA = os.path.join(HERE, "app", "data.json")
 OUTPUT = os.path.join(HERE, "output")
@@ -119,23 +121,32 @@ def publish_lock():
         f.close()
 
 def load_uploads():
-    try: return json.load(open(UPLOADS, encoding="utf-8"))
-    except Exception: return {}
+    """Registro in sola lettura.
+
+    BUGFIX 02/09: `except Exception: return {}` trasformava un registro corrotto
+    in "non e' mai stato pubblicato niente", e la run dopo ripubblicava tutto.
+    Ora un registro illeggibile e' un errore fatale.
+    """
+    return upload_registry.load(UPLOADS)
 
 def save_uploads(u):
-    os.makedirs(OUTPUT, exist_ok=True)
-    json.dump(u, open(UPLOADS, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    """Scrittura ATOMICA (temp file + fsync + os.replace) invece di troncare."""
+    upload_registry.save(UPLOADS, u)
 
 def build_plan(args):
     uploaded = load_uploads()
     # BUGFIX 01/08: stesso bug di carica_youtube.py — dedup solo per filename,
     # non riconosce un item già pubblicato se il file cambia nome (v1->v2->v3).
-    published_ids = {v.get("source_id") for v in uploaded.values() if v.get("source_id")}
+    # BUGFIX 02/09: is_settled() esclude i record 'failed' (da ritentare) e
+    # include i 'pending' (esito ignoto: vanno trattati come gia' pubblicati).
+    settled = {k for k, v in uploaded.items() if upload_registry.is_settled(v)}
+    published_ids = {v.get("source_id") for v in uploaded.values()
+                     if upload_registry.is_settled(v) and v.get("source_id")}
     plan = []
     for it in ready_items():
         key = file_key(it["file"])
         item_id = it.get("id")
-        if key in uploaded and not args.force:
+        if key in settled and not args.force:
             continue
         if item_id and item_id in published_ids and not args.force:
             print(f"  ⚠️  salto '{key}': l'item '{item_id}' è già stato pubblicato "
@@ -358,14 +369,17 @@ def main():
         sys.exit("Manca access_token. Esegui prima: python3 carica_tiktok.py --authorize")
     access_token = refresh_access_token(cfg, args.config)
 
+    failures = []
     with publish_lock():
         plan = build_plan(args)
         if not plan:
             print("Niente da pubblicare (tutto già pubblicato o nessun match) — ricontrollato dopo il lock.")
-            return
-        uploaded = load_uploads()
+            return 0
+        registry = upload_registry.Registry(UPLOADS)
         for i, p in enumerate(plan, 1):
             print(f"⬆️  [{i}/{len(plan)}] {p['key']} …")
+            # Intenzione scritta PRIMA dell'effetto esterno.
+            registry.begin(p["key"], source_id=p.get("source_id"))
             try:
                 video_size = os.path.getsize(p["path"])
                 print("    …creo container")
@@ -375,21 +389,43 @@ def main():
                 print("    …attendo" + (" invio all'inbox" if args.draft else " pubblicazione"))
                 wait_publish_complete(access_token, publish_id, draft=args.draft)
             except Exception as e:
-                print(f"  ❌ errore: {str(e)[:300]}")
+                msg = str(e)[:300]
+                print(f"  ❌ errore: {msg}")
+                failures.append((p["key"], msg))
+                # Resta pending: puo' essere un timeout su un invio riuscito.
+                print("  ↪︎ lasciato in sospeso: verificare su TikTok prima di ritentare.")
                 continue
-            uploaded[p["key"]] = {
-                "publishId": publish_id,
-                "publishedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "privacy": "DRAFT_INBOX" if args.draft else "SELF_ONLY",
-                "source_id": p.get("source_id"),
-                "caption_bozza": p["caption"] if args.draft else None,
-            }
-            save_uploads(uploaded)
+            # BUGFIX 02/09: una bozza in inbox veniva registrata come pubblicata e
+            # deduplicata per sempre, anche se l'utente non l'avrebbe mai
+            # confermata dall'app. Il record ora distingue la CONSEGNA (avvenuta,
+            # quindi non va rifatta) dalla PUBBLICAZIONE (che dipende dall'utente).
+            registry.confirm(
+                p["key"], publish_id,
+                publishId=publish_id,
+                deliveredAt=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                delivery="inbox_draft" if args.draft else "direct_post",
+                user_published=False if args.draft else True,
+                privacy="DRAFT_INBOX" if args.draft else "SELF_ONLY",
+                caption_bozza=p["caption"] if args.draft else None,
+            )
             if args.draft:
                 print(f"  ✓ inviato come bozza all'inbox TikTok: publish_id {publish_id} — completa la pubblicazione dall'app")
             else:
                 print(f"  ✓ pubblicato (SELF_ONLY): publish_id {publish_id}")
-        print(f"\n✅ Fatto. Registro: {UPLOADS}")
+        if failures:
+            print(f"\n⚠️  {len(failures)} invii non riusciti:")
+            for key, msg in failures:
+                print(f"   • {key}: {msg}")
+        else:
+            print(f"\n✅ Fatto. Registro: {UPLOADS}")
+        n_draft = sum(1 for r in registry.data.values()
+                      if r.get("delivery") == "inbox_draft" and not r.get("user_published"))
+        if n_draft:
+            print(f"\n📥 {n_draft} bozze in attesa di essere pubblicate a mano dall'app TikTok "
+                  f"(consegnate, NON ancora pubbliche).")
+
+    # BUGFIX 02/09: si usciva sempre con 0 anche se ogni invio era fallito.
+    return 1 if failures else 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

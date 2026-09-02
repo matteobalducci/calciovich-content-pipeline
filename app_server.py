@@ -24,6 +24,12 @@ import http.server
 from socketserver import ThreadingMixIn
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# I publisher attendono fino a 300s l'elaborazione lato piattaforma
+# (wait_container_ready / wait_publish_complete). Il margine deve stare SOPRA:
+# se il server li uccide prima, il contenuto puo' essere gia' pubblicato senza
+# che il registro locale lo sappia.
+PUBLISH_TIMEOUT = 420
 os.chdir(HERE)
 sys.path.insert(0, HERE)
 import stato_pipeline
@@ -146,7 +152,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         try:
-            r = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True, timeout=240)
+            # BUGFIX 02/09: il timeout era 240s mentre i publisher aspettano
+            # legittimamente fino a 300s l'elaborazione lato piattaforma. Uccidere
+            # il sottoprocesso a 240s produceva lo stato peggiore possibile:
+            # contenuto pubblicato FUORI, non registrato DENTRO. Ora il margine
+            # sta sopra il piu' lento dei publisher.
+            r = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True,
+                               timeout=PUBLISH_TIMEOUT)
             out = (r.stdout or "") + (("\n" + r.stderr) if r.stderr else "")
             self._json({"ok": r.returncode == 0, "exitCode": r.returncode, "output": out[-6000:]})
         except subprocess.TimeoutExpired:

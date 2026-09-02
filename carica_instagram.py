@@ -39,6 +39,8 @@ OPZIONI principali: --limit N (default 5) · --force (ripubblica anche se già
 import os, sys, re, json, time, argparse, mimetypes, fcntl, contextlib
 import urllib.request, urllib.parse, urllib.error
 
+import upload_registry  # registro crash-safe condiviso fra i publisher
+
 HERE = os.path.dirname(os.path.abspath(__file__))                 # .../08-video-engine
 DATA = os.path.join(HERE, "app", "data.json")
 OUTPUT = os.path.join(HERE, "output")
@@ -117,33 +119,51 @@ def publish_lock():
         f.close()
 
 def load_uploads():
-    try: return json.load(open(UPLOADS, encoding="utf-8"))
-    except Exception: return {}
+    """Registro in sola lettura.
+
+    BUGFIX 02/09: prima `except Exception: return {}` trasformava un registro
+    troncato o illeggibile in "non e' mai stato pubblicato niente", e la run
+    successiva ripubblicava l'intero catalogo. Ora un registro corrotto e' un
+    errore fatale.
+    """
+    return upload_registry.load(UPLOADS)
+
 
 def save_uploads(u):
-    os.makedirs(OUTPUT, exist_ok=True)
-    json.dump(u, open(UPLOADS, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    """Scrittura ATOMICA del registro (temp file + fsync + os.replace).
+
+    BUGFIX 02/09: era un json.dump diretto su open(..., "w"), che tronca il file
+    prima di scrivere: un crash a meta' lasciava un registro corrotto, che con il
+    vecchio load_uploads diventava un dict vuoto e faceva ripubblicare tutto.
+    """
+    upload_registry.save(UPLOADS, u)
+
 
 def build_plan(args):
     uploaded = load_uploads()
-    # BUGFIX 01/08: stesso bug di carica_youtube.py — dedup solo per filename,
-    # non riconosce un item già pubblicato se il file cambia nome (v1->v2->v3).
-    published_ids = {v.get("source_id") for v in uploaded.values() if v.get("source_id")}
+    # BUGFIX 01/08: dedup solo per filename non riconosceva un item gia' pubblicato
+    # se il file cambiava nome (v1->v2->v3): si controlla anche il source_id.
+    # BUGFIX 02/09: si considerava "gia' fatto" qualunque chiave nel registro,
+    # compresi i record 'failed' (da ritentare). is_settled() blocca su confirmed
+    # e su pending, perche' un pending e' un esito IGNOTO, non un successo.
+    settled = {k for k, v in uploaded.items() if upload_registry.is_settled(v)}
+    published_ids = {v.get("source_id") for v in uploaded.values()
+                     if upload_registry.is_settled(v) and v.get("source_id")}
     plan = []
     for it in ready_items():
         key = file_key(it["file"])
         item_id = it.get("id")
-        if key in uploaded and not args.force:
+        if key in settled and not args.force:
             continue
         if item_id and item_id in published_ids and not args.force:
-            print(f"  ⚠️  salto '{key}': l'item '{item_id}' è già stato pubblicato "
+            print(f"  \u26a0\ufe0f  salto '{key}': l'item '{item_id}' \u00e8 gi\u00e0 stato pubblicato "
                   f"sotto un altro nome file (usa --force per ripubblicare comunque)")
             continue
         if args.only and short_id(it["file"]) not in args.only and key not in args.only:
             continue
         path = abs_path(it["file"])
         if not os.path.exists(path):
-            print(f"  ⚠️  file mancante, salto: {path}"); continue
+            print(f"  \u26a0\ufe0f  file mancante, salto: {path}"); continue
         caption = build_caption(it, key)
         plan.append({
             "key": key, "path": path, "caption": caption, "data": it["data"], "source_id": item_id,
@@ -153,7 +173,7 @@ def build_plan(args):
         plan = plan[:args.limit]
     return plan
 
-# ---------------------------------------------------------------- config
+
 def load_config(args):
     if not os.path.exists(args.config):
         sys.exit(f"Manca {args.config}. Vedi GUIDA-INSTAGRAM-PUBLISHER.md per generarlo.")
@@ -362,15 +382,20 @@ def main():
     ig_user_id = cfg["meta"]["instagram_business_account_id"]
     access_token = cfg["meta"]["access_token"]
 
+    failures = []
     with publish_lock():
         plan = build_plan(args)
         if not plan:
             print("Niente da pubblicare (tutto già pubblicato o nessun match) — ricontrollato dopo il lock.")
-            return
-        uploaded = load_uploads()
+            return 0
+        registry = upload_registry.Registry(UPLOADS)
         for i, p in enumerate(plan, 1):
             print(f"⬆️  [{i}/{len(plan)}] {p['key']} …")
             r2_key = f"reels/{p['key']}.mp4"
+            # Intenzione scritta PRIMA dell'effetto esterno: se il processo muore
+            # dopo publish_container ma prima della conferma, il record pending
+            # dice alla run successiva che l'esito e' ignoto invece di ripubblicare.
+            registry.begin(p["key"], source_id=p.get("source_id"), caption=p["caption"][:200])
             try:
                 print("    …upload su R2")
                 video_url = upload_to_r2(cfg, p["path"], r2_key)
@@ -381,20 +406,31 @@ def main():
                 print("    …pubblico")
                 media_id = publish_container(ig_user_id, container_id, access_token)
             except Exception as e:
-                print(f"  ❌ errore: {str(e)[:300]}")
+                msg = str(e)[:300]
+                print(f"  ❌ errore: {msg}")
+                failures.append((p["key"], msg))
+                # Non si chiama fail(): un errore qui puo' essere un timeout su
+                # una pubblicazione andata a buon fine. Resta pending, e resta
+                # bloccato, finche' non lo si verifica a mano su Instagram.
+                print("  ↪︎ lasciato in sospeso: verificare su Instagram prima di ritentare.")
                 continue
             finally:
                 if not args.keep_r2:
                     try: delete_from_r2(cfg, r2_key)
                     except Exception: pass
-            uploaded[p["key"]] = {
-                "mediaId": media_id,
-                "publishedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "source_id": p.get("source_id"),
-            }
-            save_uploads(uploaded)
+            registry.confirm(p["key"], media_id, mediaId=media_id,
+                             publishedAt=time.strftime("%Y-%m-%dT%H:%M:%S"))
             print(f"  ✓ pubblicato: media id {media_id}")
-        print(f"\n✅ Fatto. Registro: {UPLOADS}")
+        if failures:
+            print(f"\n⚠️  {len(failures)} pubblicazioni non riuscite:")
+            for key, msg in failures:
+                print(f"   • {key}: {msg}")
+        else:
+            print(f"\n✅ Fatto. Registro: {UPLOADS}")
+
+    # BUGFIX 02/09: prima si usciva sempre con 0, anche se OGNI pubblicazione era
+    # fallita, stampando "Fatto". Un orchestratore vedeva successo.
+    return 1 if failures else 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

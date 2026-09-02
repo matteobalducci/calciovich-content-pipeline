@@ -27,6 +27,8 @@ USO
 """
 import os, sys, json, re, statistics
 
+import upload_registry  # scrittura atomica
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_PATH = os.path.join(HERE, "youtube_token.json")
 YT_UPLOADS = os.path.join(HERE, "output", "youtube-uploads.json")
@@ -169,22 +171,31 @@ def main():
             print(f"  {f['tipo']} — {f['key']} ({f['categoria']}): {f['views']} views, "
                   f"x{f['ratio']} vs mediana {f['mediana']:.0f}")
 
-    json.dump({"generatedAt": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"), "flags": flags},
-               open(OUT, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    upload_registry.save(OUT, {"generatedAt": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"),
+                               "flags": flags})
 
     if apply_changes:
+        # BUGFIX 02/09 — LIMITE STATISTICO NOTO: il confronto e' fra le view
+        # LIFETIME di video vecchi e quelle di un video appena uscito, che ha
+        # avuto poche ore per accumularle. Un video nuovo e' quindi
+        # strutturalmente spinto verso FAIL, e con --apply questo bastava a
+        # SOSPENDERE automaticamente un formato. Un falso positivo che spegne un
+        # formato costa molto piu' di un vero positivo scoperto un giorno dopo.
+        #
+        # Finche' il confronto non passa a finestre fisse dalla pubblicazione
+        # (view a 24/48/168 ore, che richiedono la Analytics API — vedi la fase
+        # BigQuery), i FAIL non modificano piu' nulla da soli: si segnalano e
+        # basta. I WIN non sono simmetrici, perche' un falso WIN non spegne
+        # niente.
         fails = [f for f in flags if f["tipo"] == "FAIL"]
         if fails:
-            rot = load(ROTATION, {})
-            paused = rot.setdefault("personaggio_paused_formats", {})
+            print("\n⚠️  FAIL rilevati, NON applicati automaticamente:")
             for f in fails:
-                if f["categoria"] == "personaggio":
-                    for ck in CHARACTER_KEYS:
-                        if ck.replace("-", "_") in f["key"].lower().replace("-", "_"):
-                            fmt = ck.replace("-", "_")
-                            paused[fmt] = f"trigger outlier automatico: {f['key']} a {f['views']} views (x{f['ratio']} vs mediana), pausato senza aspettare la revisione quindicinale"
-                            print(f"  → pausato '{fmt}' in rotation-state.json")
-            json.dump(rot, open(ROTATION, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+                print(f"   • {f['key']} ({f['categoria']}): {f['views']} views, "
+                      f"x{f['ratio']} vs mediana {f['mediana']:.0f}")
+            print("   Il confronto con le view lifetime penalizza i video appena usciti.")
+            print("   Verifica l'eta' del video prima di decidere; per sospendere davvero "
+                  "un formato, modifica rotation-state.json a mano.")
         wins = [f for f in flags if f["tipo"] == "WIN"]
         if wins:
             print("  → WIN outlier: nessuna modifica automatica di stato, va solo preferito nel prossimo slot eleggibile dello stesso formato (decisione della sessione che pubblica).")
