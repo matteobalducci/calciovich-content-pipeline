@@ -35,9 +35,29 @@ try:
 except Exception:
     TZ = None  # fallback: si usa l'ora locale di sistema
 
+import upload_registry  # registro crash-safe condiviso fra i publisher
+
 HERE = os.path.dirname(os.path.abspath(__file__))                 # .../08-video-engine
 DATA = os.path.join(HERE, "app", "data.json")
 OUTPUT = os.path.join(HERE, "output")
+
+# Su YouTube i link nella descrizione SONO cliccabili (su Instagram no: lì
+# "link in bio" e' corretto e va lasciato stare). Le descrizioni condivise fra
+# le piattaforme dicevano solo "link in bio", quindi i video piu' visti non
+# avevano alcun percorso d'acquisto: 93.000 view sui primi due video senza un
+# link. Qui il link viene messo davvero, a ogni upload.
+LIBRO_URL = "https://calciovich.gumroad.com/l/laverastoriadicalciovich"
+
+def desc_con_link(desc):
+    """Aggiunge il link al libro alla descrizione YouTube (idempotente)."""
+    d = desc or ""
+    if "gumroad.com" in d.lower():
+        return d
+    # se c'e' gia' una riga "... — link in bio", la si completa col link vero
+    if "link in bio" in d:
+        d = d.replace("link in bio", LIBRO_URL)
+        return d
+    return d.rstrip() + f"\n\n📖 La vera storia di Calciovich — il libro:\n{LIBRO_URL}"
 UPLOADS = os.path.join(OUTPUT, "youtube-uploads.json")            # registro: cosa è già caricato
 # Canale Calciovich (Brand Account) — vedi nota "guardia anti-canale-sbagliato"
 # in get_service(): scoperto il 01/09 che il token OAuth, dopo il rescope del
@@ -108,27 +128,75 @@ def publish_lock():
         f.close()
 
 def load_uploads():
-    try: return json.load(open(UPLOADS, encoding="utf-8"))
-    except Exception: return {}
+    """Registro in sola lettura, per chi deve solo consultarlo.
 
-def save_uploads(u):
-    os.makedirs(OUTPUT, exist_ok=True)
-    json.dump(u, open(UPLOADS, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    BUGFIX 02/09: prima questa funzione faceva `except Exception: return {}`,
+    quindi un registro troncato o illeggibile diventava silenziosamente un dict
+    vuoto — cioè "non è mai stato pubblicato niente" — e la run successiva
+    ricaricava l'intero catalogo. Ora un registro corrotto è un errore fatale.
+    """
+    return upload_registry.load(UPLOADS)
 
-def build_plan(args):
-    uploaded = load_uploads()
+
+def reconcile_pending(youtube, registry):
+    """Risolve gli upload rimasti 'pending' da una run morta a metà.
+
+    Un record pending significa che avevamo dichiarato l'intenzione di caricare
+    ma non abbiamo mai visto la conferma: l'esito è IGNOTO, non fallito. Qui lo
+    chiediamo a YouTube, cercando fra gli ultimi caricamenti del canale un video
+    con lo stesso titolo. Se lo troviamo il record diventa confirmed; se il
+    canale non ce l'ha, il record si cancella e l'item torna caricabile.
+    Se non riusciamo a chiedere (rete, quota) il record resta pending e l'item
+    resta bloccato: ripubblicare due volte è peggio che ripubblicare tardi.
+    """
+    pending = registry.pending()
+    if not pending:
+        return
+    print(f"🔎 {len(pending)} upload in sospeso da una run precedente: verifico su YouTube…")
+
+    recent = {}
+    ch = youtube.channels().list(part="contentDetails", mine=True).execute()
+    uploads_pl = ch["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+    page = None
+    while len(recent) < 200:
+        resp = youtube.playlistItems().list(
+            part="snippet", playlistId=uploads_pl, maxResults=50, pageToken=page
+        ).execute()
+        for it in resp.get("items", []):
+            recent[it["snippet"]["title"].strip()] = it["snippet"]["resourceId"]["videoId"]
+        page = resp.get("nextPageToken")
+        if not page:
+            break
+
+    def probe(key, record):
+        title = (record.get("title") or "").strip()
+        if not title:
+            raise RuntimeError("record senza titolo: non verificabile")
+        return recent.get(title)
+
+    for key, outcome in registry.reconcile(probe):
+        print(f"   • {key}: {outcome}")
+
+def build_plan(args, registry=None):
+    uploaded = registry.data if registry is not None else load_uploads()
     # BUGFIX 01/08: il dedup era basato SOLO sul filename corrente. Quando un item
     # viene rigenerato (v1 -> v2 -> v3, stesso "id" logico in app/data.json ma file
     # diverso) lo script non riconosceva che era già stato caricato e lo ripubblicava
     # da capo (causa reale dei duplicati "Ep.3"/"La signora grigia" e di
     # coast-to-coast v2/v3 caricati entrambi lo stesso giorno). Ora si controlla
     # anche l'"id" stabile dell'item tramite "source_id" salvato nel registro.
-    published_ids = {v.get("source_id") for v in uploaded.values() if v.get("source_id")}
+    # BUGFIX 02/09: il dedup considerava "già fatto" qualunque chiave presente nel
+    # registro, compresi i record 'failed' (che invece vanno ritentati). Ora si passa
+    # da is_settled(), che blocca su confirmed e su pending — un pending è un esito
+    # IGNOTO e va trattato come già pubblicato finché la riconciliazione non decide.
+    settled = {k for k, v in uploaded.items() if upload_registry.is_settled(v)}
+    published_ids = {v.get("source_id") for v in uploaded.values()
+                     if upload_registry.is_settled(v) and v.get("source_id")}
     plan = []
     for it in ready_items():
         key = file_key(it["file"])
         item_id = it.get("id")
-        if key in uploaded and not args.force:
+        if key in settled and not args.force:
             continue
         if item_id and item_id in published_ids and not args.force:
             print(f"  ⚠️  salto '{key}': l'item '{item_id}' è già stato pubblicato "
@@ -225,7 +293,7 @@ def upload_one(youtube, p, args):
     if "ai-clips" in p["path"]:
         status["containsSyntheticMedia"] = True
     body = {
-        "snippet": {"title": p["title"], "description": p["desc"],
+        "snippet": {"title": p["title"], "description": desc_con_link(p["desc"]),
                     "tags": p["tags"], "categoryId": str(args.category)},
         "status": status,
     }
@@ -278,35 +346,65 @@ def main():
         print("DRY RUN: nessun upload eseguito. Togli --dry-run per caricare davvero.")
         return
 
+    failures = []
     with publish_lock():
+        youtube = get_service(args)
+        registry = upload_registry.Registry(UPLOADS)
+
+        # Prima di qualsiasi upload: risolvi ciò che una run precedente ha lasciato
+        # a metà. Senza questo passaggio un pending resterebbe a bloccare l'item
+        # per sempre.
+        reconcile_pending(youtube, registry)
+
         # ricalcola il piano DENTRO il lock: se un'altra esecuzione ha appena
         # pubblicato qualcosa, questa vede il registro aggiornato e non duplica.
-        plan = build_plan(args)
+        plan = build_plan(args, registry)
         if not plan:
             print("Niente da caricare (tutto già caricato o nessun match) — ricontrollato dopo il lock.")
-            return
-        youtube = get_service(args)
-        uploaded = load_uploads()
+            return 0
         any_uploaded = False
         for i, p in enumerate(plan, 1):
             print(f"⬆️  [{i}/{len(plan)}] {p['key']} …")
+
+            # SCRITTURA DELL'INTENZIONE, prima dell'effetto esterno. Se il processo
+            # muore fra qui e la conferma, il record pending dice alla run successiva
+            # che l'esito è ignoto e va verificato, invece di far ripartire l'upload.
+            registry.begin(
+                p["key"],
+                source_id=p.get("source_id"),
+                title=p["title"],
+                publishAt=p["publishAt"],
+                privacy=("private" if p["publishAt"] else args.privacy),
+            )
             try:
                 vid = upload_one(youtube, p, args)
             except Exception as e:
                 msg = str(e)
                 print(f"  ❌ errore: {msg[:200]}")
+                failures.append((p["key"], msg[:200]))
                 if "quota" in msg.lower():
+                    # Quota esaurita: l'upload non è partito, quindi è un fallimento
+                    # NOTO e l'item può tornare disponibile.
+                    registry.fail(p["key"], msg)
                     print("  Quota giornaliera esaurita: riprova domani o richiedi aumento quota.")
                     break
+                # Ogni altro errore può essere un timeout su un upload andato a buon
+                # fine: si lascia pending di proposito, e sarà la riconciliazione a
+                # decidere alla prossima run.
+                print("  ↪︎ lasciato in sospeso: la prossima esecuzione verificherà su YouTube.")
                 continue
             url = f"https://youtu.be/{vid}"
-            uploaded[p["key"]] = {"videoId": vid, "url": url, "uploadedAt": datetime.now().isoformat(),
-                                  "publishAt": p["publishAt"], "privacy": ("private" if p["publishAt"] else args.privacy),
-                                  "source_id": p.get("source_id")}
-            save_uploads(uploaded)
+            registry.confirm(p["key"], vid, videoId=vid, url=url,
+                             uploadedAt=datetime.now().isoformat())
             any_uploaded = True
             print(f"  ✓ caricato: {url}" + (f"  → pubblica il {p['publishAt']}" if p["publishAt"] else " (privato)"))
-        print(f"\n✅ Fatto. Registro: {UPLOADS}")
+
+        if failures:
+            print(f"\n⚠️  {len(failures)} upload non riusciti:")
+            for key, msg in failures:
+                print(f"   • {key}: {msg}")
+        else:
+            print(f"\n✅ Fatto. Registro: {UPLOADS}")
 
     # AGGIUNTO 02/09 (richiesta autore): ogni video nuovo va aggiunto in automatico alla
     # playlist giusta (Gol Impossibili / La storia in ordine / La storia in formato esteso),
@@ -320,5 +418,10 @@ def main():
         except Exception as e:
             print(f"  ⚠️  aggiornamento playlist fallito ({e}) — rilancia a mano: python3 gestisci_playlist.py")
 
+    # BUGFIX 02/09: prima lo script usciva sempre con 0, anche se OGNI upload era
+    # fallito, stampando "✅ Fatto". Un orchestratore vedeva successo. Ora l'exit
+    # code riflette l'esito reale.
+    return 1 if failures else 0
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
