@@ -1,26 +1,19 @@
 # Calciovich Content Pipeline
 
-**A production content system for three streaming platforms — and the instrumentation
-that turns its own output into a measurable dataset.**
+**An unattended production system that generates and publishes video content to three
+platforms every day — and accumulates the performance data those platforms return.**
 
-The pipeline runs unattended every day: it reads the state of a content queue, decides
-what to produce under a weekly rotation, generates the video, passes it through a
-visual quality gate, publishes it to YouTube, Instagram and TikTok, and updates
-registries, playlists and state as it goes. Orchestration is handled by an AI agent
-(Claude Code) driving the scripts in this repo.
+The pipeline reads the state of a content queue, decides what to produce under a weekly
+rotation, generates the video, passes it through a visual quality gate, publishes it to
+YouTube, Instagram and TikTok, and updates registries, playlists and state as it goes.
+Orchestration is handled by an AI agent (Claude Code) driving the scripts in this repo.
 
-The part I care about most is the second half: **every release is measured.** A
-historical logger accumulates channel metrics with no retention cutoff, an outlier
-detector scores each new video against the rolling median of its own format, and a
-dashboard reads the resulting time series. The system is the source of its own
-analytics.
-
-> **Context.** This is the *upstream* half of a pair of projects on the same domain.
-> [Music Streaming Analytics](https://github.com/matteobalducci/music-streaming-analytics)
-> models streaming event data (star schema, dbt, Power BI) and
-> [Streaming Insights Copilot](https://github.com/matteobalducci/streaming-insights-copilot)
-> puts a natural-language query layer over it. This repo is where the events come
-> from.
+Alongside publishing, the system records what happens afterwards: a historical logger
+accumulates channel metrics with no retention cutoff, and an outlier detector scores
+each release against the rolling median of its own format. Today that measurement layer
+is deliberately thin — a daily trigger and a local dashboard. **Turning the accumulated
+time series into a proper analytics stack is the next phase of the project** (see
+[Roadmap](#roadmap)).
 
 ## Data flow
 
@@ -37,11 +30,14 @@ flowchart LR
   TS --> DASH["Dashboard<br/>app_server.py"]
   OUT --> P
   DASH --> P
+  TS -.planned.-> BQ["BigQuery<br/>+ Looker"]
+  style BQ stroke-dasharray: 4 4
 ```
 
-The loop closes: measurement feeds back into what gets produced next.
+Measurement feeds back into what gets produced next. The dashed branch is the roadmap,
+not shipped.
 
-## Measurement layer
+## Measurement layer (today)
 
 - **`aggiorna_youtube_stats.py`** — historical logger for subscribers, views and
   followers, running on a `LaunchAgent` schedule with **no retention cutoff**. Platform
@@ -127,6 +123,26 @@ Python 3 · Google API Client (YouTube Data API v3, YouTube Analytics API) · Me
 Graph API · TikTok Content Posting API · Cloudflare R2 (S3-compatible, via boto3) ·
 PiAPI (Seedance/Seedream) · Pollinations · edge-tts · Pillow · ffmpeg (via
 imageio-ffmpeg)
+
+## Roadmap
+
+The pipeline's job today is production and publishing. The metrics it accumulates are
+still queried locally, from flat files, by a single-purpose dashboard — enough to answer
+"is this release off the scale?", not enough to answer anything about how an audience
+actually behaves over time.
+
+The next phase moves that data onto a proper stack:
+
+1. **Ingestion into BigQuery** — the channel time series and per-release metrics, from
+   all three platforms, loaded on a schedule instead of read from local files.
+2. **Dimensional modelling** — a warehouse layer over content, format, platform and
+   date, so performance can be sliced by dimensions the platform APIs don't expose
+   together.
+3. **Looker** — reporting on top of the model, replacing the local dashboard.
+
+The interesting questions only become answerable at that point: how retention differs by
+format across platforms, whether a release's early trajectory predicts its ceiling, and
+which content attributes correlate with sharing rather than with views.
 
 ## Repository scope
 
