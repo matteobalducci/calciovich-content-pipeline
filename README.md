@@ -1,5 +1,7 @@
 # Calciovich Content Pipeline
 
+[![tests](https://github.com/matteobalducci/calciovich-content-pipeline/actions/workflows/tests.yml/badge.svg)](https://github.com/matteobalducci/calciovich-content-pipeline/actions/workflows/tests.yml)
+
 **A production system that generates and publishes video content to three platforms on a
 daily cadence — and accumulates the performance data those platforms return.**
 
