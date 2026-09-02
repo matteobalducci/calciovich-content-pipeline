@@ -17,7 +17,7 @@ has not cleared platform audit. YouTube and Instagram publish without interventi
 
 Alongside publishing, the system records what happens afterwards: a historical logger
 accumulates channel metrics with no retention cutoff, and an outlier detector scores
-each release against the rolling median of its own format. Today that measurement layer
+each release against the median of previous releases in the same format. Today that measurement layer
 is deliberately thin — a daily trigger and a local dashboard. **Turning the accumulated
 time series into a proper analytics stack is the next phase of the project** (see
 [Roadmap](#roadmap)).
@@ -119,15 +119,23 @@ or slow detection.
 
 ## Notable engineering decisions
 
-- **Deduplication across runs**: publishers deduplicate both on filename and on a stable
-  item id (which survives a rename after a retry), and take a file lock so two runs of
-  the same script never overlap.
-  **What this does not yet cover**, and it is the most interesting open problem in the
-  repo: the external effect happens *before* the local registry is written. If a platform
-  accepts the upload but the process dies before `save_uploads()`, the registry has no
-  record and a retry republishes. Closing that gap needs a transactional
-  `pending → external_id → confirmed` state written atomically, plus reconciliation
-  against the platform API before any retry — not a bigger lock.
+- **Write-ahead registry, not just a lock** (`upload_registry.py`): the interesting
+  failure in a publishing pipeline is not two runs racing — a file lock handles that —
+  it is a crash landing *between* the external side effect and the local record. The
+  platform has the video, the registry does not, and the next run publishes it again.
+
+  So the intent is written down first: `begin()` records `pending` before the upload,
+  `confirm()` promotes it to `confirmed` after. A `pending` record left by a dead process
+  means the outcome is **unknown**, not failed, so it keeps blocking re-upload until
+  `reconcile()` asks the platform what actually happened — for YouTube, by scanning the
+  channel's uploads playlist by title. Found → confirm. Provably absent → clear and allow
+  a retry. Unreachable → stay pending, stay blocked, because publishing twice is worse
+  than publishing late.
+
+  Two supporting choices: the registry **fails closed** on a corrupt file rather than
+  degrading to an empty dict (an empty registry means "nothing was ever published", which
+  would republish the entire back catalogue), and writes go through temp file + `fsync` +
+  `os.replace` so it is never observed half-written.
 - **Lean prompts**: direction/brand/kit clauses are never hand-pasted into a prompt —
   they're expanded from a shared template, so they stay identical to themselves
   instead of drifting as ad-hoc fixes pile up over time.
