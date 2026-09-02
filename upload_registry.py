@@ -184,6 +184,20 @@ class Registry:
         save(self.path, self.data)
         return attempt_id
 
+    def progress(self, key: str, **meta) -> None:
+        """Annota un identificativo intermedio SENZA cambiare stato.
+
+        Serve perche' un record 'pending' che contiene solo l'intenzione non e'
+        riconciliabile: non abbiamo niente da chiedere alla piattaforma. Salvando
+        appena disponibile l'id intermedio (container Instagram, publish_id
+        TikTok) il recovery ha un appiglio concreto invece di dover indovinare.
+        """
+        record = dict(self.data.get(key) or {})
+        record.update(meta)
+        record["updatedAt"] = _now()
+        self.data[key] = record
+        save(self.path, self.data)
+
     def confirm(self, key: str, external_id: str, **meta) -> None:
         """Record that the platform accepted the upload."""
         record = dict(self.data.get(key) or {})

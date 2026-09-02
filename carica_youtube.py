@@ -154,16 +154,24 @@ def reconcile_pending(youtube, registry):
         return
     print(f"🔎 {len(pending)} upload in sospeso da una run precedente: verifico su YouTube…")
 
+    # BUGFIX 02/09 (audit Codex): la prima versione teneva un dict
+    # titolo -> videoId, quindi due video con lo STESSO titolo si sovrascrivevano
+    # e la riconciliazione poteva confermare il video sbagliato — associando al
+    # nuovo item un video vecchio e lasciando fuori dal registro quello appena
+    # caricato. Ora si tengono TUTTI i candidati e un titolo ambiguo non
+    # conferma niente.
     recent = {}
     ch = youtube.channels().list(part="contentDetails", mine=True).execute()
     uploads_pl = ch["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
-    page = None
-    while len(recent) < 200:
+    page, visti = None, 0
+    while visti < 200:
         resp = youtube.playlistItems().list(
             part="snippet", playlistId=uploads_pl, maxResults=50, pageToken=page
         ).execute()
         for it in resp.get("items", []):
-            recent[it["snippet"]["title"].strip()] = it["snippet"]["resourceId"]["videoId"]
+            recent.setdefault(it["snippet"]["title"].strip(), []).append(
+                it["snippet"]["resourceId"]["videoId"])
+            visti += 1
         page = resp.get("nextPageToken")
         if not page:
             break
@@ -172,7 +180,13 @@ def reconcile_pending(youtube, registry):
         title = (record.get("title") or "").strip()
         if not title:
             raise RuntimeError("record senza titolo: non verificabile")
-        return recent.get(title)
+        candidati = recent.get(title, [])
+        if len(candidati) > 1:
+            # Ambiguo: meglio restare bloccati che confermare il video sbagliato.
+            raise RuntimeError(
+                f"{len(candidati)} video con lo stesso titolo ({', '.join(candidati)}): "
+                f"risolvere a mano quale corrisponde")
+        return candidati[0] if candidati else None
 
     for key, outcome in registry.reconcile(probe):
         print(f"   • {key}: {outcome}")

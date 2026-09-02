@@ -29,7 +29,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # (wait_container_ready / wait_publish_complete). Il margine deve stare SOPRA:
 # se il server li uccide prima, il contenuto puo' essere gia' pubblicato senza
 # che il registro locale lo sappia.
-PUBLISH_TIMEOUT = 420
+# NOTA (audit Codex 02/09): 300s e' solo l'attesa di elaborazione lato
+# piattaforma; a quella vanno sommati il caricamento su R2, la creazione del
+# container e la latenza delle API. 420s puo' ancora non bastare per un file
+# grande su una linea lenta. Questo timeout resta come rete di sicurezza contro
+# un processo appeso, NON come limite di correttezza: la protezione vera contro
+# il taglio a meta' e' il registro write-ahead, che al giro dopo riconcilia.
+PUBLISH_TIMEOUT = 900
 os.chdir(HERE)
 sys.path.insert(0, HERE)
 import stato_pipeline
@@ -162,7 +168,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             out = (r.stdout or "") + (("\n" + r.stderr) if r.stderr else "")
             self._json({"ok": r.returncode == 0, "exitCode": r.returncode, "output": out[-6000:]})
         except subprocess.TimeoutExpired:
-            self._json({"ok": False, "error": "timeout (240s)"}, 504)
+            self._json({"ok": False, "error": f"timeout ({PUBLISH_TIMEOUT}s) — il publisher potrebbe aver comunque pubblicato: controlla il registro prima di ritentare"}, 504)
         except Exception as e:
             self._json({"ok": False, "error": str(e)}, 500)
 

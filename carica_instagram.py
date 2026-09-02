@@ -139,6 +139,52 @@ def save_uploads(u):
     upload_registry.save(UPLOADS, u)
 
 
+def reconcile_pending(ig_user_id, access_token, registry):
+    """Risolve i pending lasciati da una run morta a meta'.
+
+    BUGFIX 02/09 (audit Codex): la prima versione scriveva 'pending' senza
+    prevedere alcun recovery, quindi un timeout bloccava l'item PER SEMPRE —
+    un blocco permanente, peggio del problema che si voleva risolvere.
+
+    Instagram non permette di risalire dal container al media pubblicato, quindi
+    si guarda l'elenco dei media recenti e si cerca la didascalia. Un match
+    ambiguo (stessa didascalia su piu' media) NON conferma niente: meglio restare
+    bloccati che associare il media sbagliato.
+    """
+    pending = registry.pending()
+    if not pending:
+        return
+    print(f"🔎 {len(pending)} pubblicazioni in sospeso da una run precedente: verifico su Instagram…")
+
+    recenti = {}
+    try:
+        resp = graph_request(f"{ig_user_id}/media",
+                             {"fields": "id,caption", "limit": 50,
+                              "access_token": access_token}, method="GET")
+        for m in resp.get("data", []):
+            cap = (m.get("caption") or "").strip()[:200]
+            if cap:
+                recenti.setdefault(cap, []).append(m["id"])
+    except Exception as e:
+        print(f"   ⚠️  impossibile leggere i media recenti ({e}); i pending restano bloccati.")
+        return
+
+    def probe(key, record):
+        if not record.get("containerId"):
+            # Morto prima di creare il container: nessun effetto remoto.
+            return None
+        cap = (record.get("caption") or "").strip()[:200]
+        if not cap:
+            raise RuntimeError("record senza didascalia: non verificabile")
+        candidati = recenti.get(cap, [])
+        if len(candidati) > 1:
+            raise RuntimeError(f"{len(candidati)} media con la stessa didascalia: risolvere a mano")
+        return candidati[0] if candidati else None
+
+    for key, outcome in registry.reconcile(probe):
+        print(f"   • {key}: {outcome}")
+
+
 def build_plan(args):
     uploaded = load_uploads()
     # BUGFIX 01/08: dedup solo per filename non riconosceva un item gia' pubblicato
@@ -389,6 +435,11 @@ def main():
             print("Niente da pubblicare (tutto già pubblicato o nessun match) — ricontrollato dopo il lock.")
             return 0
         registry = upload_registry.Registry(UPLOADS)
+        reconcile_pending(ig_user_id, access_token, registry)
+        plan = [q for q in plan if not registry.already_handled(q["key"], q.get("source_id"))]
+        if not plan:
+            print("Niente da pubblicare dopo la riconciliazione.")
+            return 0
         for i, p in enumerate(plan, 1):
             print(f"⬆️  [{i}/{len(plan)}] {p['key']} …")
             r2_key = f"reels/{p['key']}.mp4"
@@ -401,6 +452,9 @@ def main():
                 video_url = upload_to_r2(cfg, p["path"], r2_key)
                 print("    …creo container Instagram")
                 container_id = create_container(ig_user_id, video_url, p["caption"], access_token)
+                # Persistito SUBITO: e' l'appiglio per il recovery. Un pending che
+                # contiene solo l'intenzione non e' riconciliabile.
+                registry.progress(p["key"], containerId=container_id)
                 print("    …attendo elaborazione")
                 wait_container_ready(container_id, access_token)
                 print("    …pubblico")

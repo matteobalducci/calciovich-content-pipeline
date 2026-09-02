@@ -20,8 +20,10 @@ Non tocca MAI la strategia di fondo (budget, rotazione, obiettivi) — solo azio
 reversibili e già praticate in questo progetto (pausa/preferenza di un format).
 
 USO
-  python3 check_outliers.py                # stampa report, non scrive nulla
-  python3 check_outliers.py --apply         # inoltre applica le pause FAIL a
+  python3 check_outliers.py                # stampa il report e scrive outlier-flags.json
+  python3 check_outliers.py --apply         # DEPRECATO: i FAIL non sospendono piu'
+                                            # nulla da soli (vedi la nota nel codice).
+                                            # Restava per: 
                                              # rotation-state.json / ai-content-queue.json
                                              # (stesso meccanismo gia' usato per vecio_dixe/tomasito)
 """
@@ -80,10 +82,15 @@ def categoria(key, app_map):
     return "altro"
 
 def load(path, default):
+    """BUGFIX 02/09 (audit Codex): ingoiava qualsiasi errore e restituiva il
+    default, quindi un registro corrotto diventava "nessun video da analizzare"
+    e il report veniva riscritto con un falso stato pulito — l'opposto della
+    politica fail-closed adottata nei publisher. Ora un file assente e' normale,
+    un file illeggibile e' un errore."""
     try:
-        return json.load(open(path, encoding="utf-8"))
-    except Exception:
-        return default
+        return upload_registry.load(path) or default
+    except upload_registry.RegistryCorrupt:
+        raise
 
 def fetch_stats(video_ids):
     from google.oauth2.credentials import Credentials

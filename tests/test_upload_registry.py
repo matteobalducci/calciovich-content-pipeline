@@ -206,3 +206,53 @@ def test_reconcile_is_idempotent_across_repeated_runs(path):
     final = Registry(path)
     assert final.data["ep1.mp4"]["external_id"] == "yt-1"
     assert final.pending() == {}
+
+
+# --- progress(): l'appiglio per la riconciliazione ------------------------
+
+
+def test_progress_records_an_intermediate_id_without_leaving_pending(path):
+    """Un pending che contiene solo l'intenzione non e' riconciliabile: non
+    abbiamo niente da chiedere alla piattaforma. progress() salva l'id
+    intermedio appena disponibile, mantenendo lo stato pending."""
+    reg = Registry(path)
+    reg.begin("ep1.mp4", source_id="s1")
+    reg.progress("ep1.mp4", containerId="c-42")
+
+    fresh = Registry(path)
+    rec = fresh.data["ep1.mp4"]
+    assert state_of(rec) == PENDING
+    assert rec["containerId"] == "c-42"
+    assert rec["source_id"] == "s1", "progress non deve perdere i campi di begin"
+
+
+def test_progress_survives_into_reconciliation(path):
+    reg = Registry(path)
+    reg.begin("ep1.mp4", source_id="s1")
+    reg.progress("ep1.mp4", publishId="tk-7")
+
+    visti = []
+
+    def probe(key, rec):
+        visti.append(rec.get("publishId"))
+        return rec.get("publishId")
+
+    fresh = Registry(path)
+    fresh.reconcile(probe)
+    assert visti == ["tk-7"]
+    assert fresh.data["ep1.mp4"]["state"] == CONFIRMED
+
+
+def test_pending_without_progress_is_cleared_as_never_started(path):
+    """Se il processo e' morto PRIMA di creare il container/publish_id, nessun
+    effetto remoto puo' essere avvenuto: l'item deve tornare disponibile."""
+    reg = Registry(path)
+    reg.begin("ep1.mp4", source_id="s1")
+
+    def probe(key, rec):
+        return None if not rec.get("containerId") else "wrong"
+
+    fresh = Registry(path)
+    fresh.reconcile(probe)
+    assert "ep1.mp4" not in fresh.data
+    assert not fresh.already_handled("ep1.mp4", source_id="s1")

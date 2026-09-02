@@ -133,6 +133,41 @@ def save_uploads(u):
     """Scrittura ATOMICA (temp file + fsync + os.replace) invece di troncare."""
     upload_registry.save(UPLOADS, u)
 
+def reconcile_pending(access_token, registry):
+    """Risolve i pending lasciati da una run morta a meta'.
+
+    BUGFIX 02/09 (audit Codex): la prima versione scriveva 'pending' senza
+    prevedere alcun recovery, quindi un timeout o una rete caduta bloccavano
+    l'item PER SEMPRE. Un blocco permanente e' peggio del problema che stavamo
+    risolvendo.
+
+    TikTok espone lo stato di una pubblicazione a partire dal publish_id, che
+    ora salviamo appena disponibile: qui lo si interroga e si decide.
+    """
+    pending = registry.pending()
+    if not pending:
+        return
+    print(f"🔎 {len(pending)} invii in sospeso da una run precedente: verifico su TikTok…")
+
+    def probe(key, record):
+        publish_id = record.get("publishId")
+        if not publish_id:
+            # Morto PRIMA di init_upload: nessun effetto remoto puo' essere
+            # avvenuto, quindi e' sicuro sbloccare l'item.
+            return None
+        resp = api_post("post/publish/status/fetch/", access_token, {"publish_id": publish_id})
+        status = (resp.get("data") or {}).get("status", "")
+        if status in ("PUBLISH_COMPLETE", "SEND_TO_USER_INBOX"):
+            return publish_id
+        if status in ("FAILED", "CANCELED"):
+            return None
+        # PROCESSING_* o stato sconosciuto: non sappiamo ancora. Resta bloccato.
+        raise RuntimeError(f"stato ancora non definitivo: {status or 'ignoto'}")
+
+    for key, outcome in registry.reconcile(probe):
+        print(f"   • {key}: {outcome}")
+
+
 def build_plan(args):
     uploaded = load_uploads()
     # BUGFIX 01/08: stesso bug di carica_youtube.py — dedup solo per filename,
@@ -176,7 +211,9 @@ def load_config(path):
     return cfg
 
 def save_config(path, cfg):
-    json.dump(cfg, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    """Scrittura ATOMICA: il file contiene i refresh token, e un troncamento a
+    meta' costringerebbe a rifare tutta l'autorizzazione OAuth."""
+    upload_registry.save(path, cfg)
 
 # ---------------------------------------------------------------- OAuth
 def print_authorize_url(args):
@@ -376,6 +413,11 @@ def main():
             print("Niente da pubblicare (tutto già pubblicato o nessun match) — ricontrollato dopo il lock.")
             return 0
         registry = upload_registry.Registry(UPLOADS)
+        reconcile_pending(access_token, registry)
+        plan = [q for q in plan if not registry.already_handled(q["key"], q.get("source_id"))]
+        if not plan:
+            print("Niente da pubblicare dopo la riconciliazione.")
+            return 0
         for i, p in enumerate(plan, 1):
             print(f"⬆️  [{i}/{len(plan)}] {p['key']} …")
             # Intenzione scritta PRIMA dell'effetto esterno.
@@ -384,6 +426,10 @@ def main():
                 video_size = os.path.getsize(p["path"])
                 print("    …creo container")
                 publish_id, upload_url = init_upload(access_token, p["caption"], video_size, draft=args.draft)
+                # Il publish_id e' l'unico appiglio per il recovery: va persistito
+                # SUBITO, prima del caricamento. Un pending senza publish_id non e'
+                # riconciliabile e resterebbe bloccato per sempre.
+                registry.progress(p["key"], publishId=publish_id, draft=bool(args.draft))
                 print("    …carico il video")
                 upload_video(upload_url, p["path"], video_size)
                 print("    …attendo" + (" invio all'inbox" if args.draft else " pubblicazione"))
