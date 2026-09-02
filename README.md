@@ -1,12 +1,17 @@
 # Calciovich Content Pipeline
 
-**An unattended production system that generates and publishes video content to three
-platforms every day — and accumulates the performance data those platforms return.**
+**A production system that generates and publishes video content to three platforms on a
+daily cadence — and accumulates the performance data those platforms return.**
 
 The pipeline reads the state of a content queue, decides what to produce under a weekly
-rotation, generates the video, passes it through a visual quality gate, publishes it to
-YouTube, Instagram and TikTok, and updates registries, playlists and state as it goes.
-Orchestration is handled by an AI agent (Claude Code) driving the scripts in this repo.
+rotation, generates the video, renders a contact sheet for visual review, publishes it,
+and updates registries, playlists and state as it goes. Orchestration is handled by an
+AI agent (Claude Code) driving the scripts in this repo.
+
+Two honest caveats about "unattended": the visual QC step **produces a contact sheet for
+a human to look at — it does not gate the publishers**, and TikTok publishing goes to an
+Inbox draft that the account owner confirms in the app, because the project's TikTok app
+has not cleared platform audit. YouTube and Instagram publish without intervention.
 
 Alongside publishing, the system records what happens afterwards: a historical logger
 accumulates channel metrics with no retention cutoff, and an outlier detector scores
@@ -43,11 +48,20 @@ not shipped.
   followers, running on a `LaunchAgent` schedule with **no retention cutoff**. Platform
   APIs expose rolling windows; keeping the full series locally is what makes trend and
   cohort analysis possible later.
-- **`check_outliers.py`** — compares each new release against the **rolling median of
-  its own format** (YouTube Analytics API) and flags outliers immediately (`WIN ≥5×`,
-  `FAIL ≤0.2×`). Per-format baselines matter: a short-form clip and a long-form episode
-  have distributions that can differ by two orders of magnitude, so a single global
-  threshold produces nothing but false signals.
+- **`check_outliers.py`** — compares the latest release in each format against the
+  **median lifetime view count of previous releases in the same format** (YouTube Data
+  API v3, `videos.list`), requiring at least 3 prior releases before it trusts the
+  baseline, and flags outliers (`WIN ≥5×`, `FAIL ≤0.2×`). Per-format baselines matter: a
+  short-form clip and a long-form episode have distributions that can differ by two
+  orders of magnitude, so a single global threshold produces nothing but false signals.
+
+  **Known limitation, stated deliberately:** comparing a hours-old video against the
+  *lifetime* totals of older ones is not a valid comparison — a new release is
+  structurally biased toward `FAIL`. The statistically correct version compares a fixed
+  window from each video's own publication (views at 24h / 48h / 168h), which requires
+  the Analytics API rather than Data API totals. That is part of the warehouse work in
+  the [Roadmap](#roadmap); until then the `FAIL` side of this signal should be read as a
+  prompt to look, not as a verdict.
 - **`app_server.py`** — local HTTP server backing a dashboard over pipeline state and
   the accumulated metrics, regenerating its data on every start.
 
@@ -87,7 +101,7 @@ or slow detection.
 
 **Multi-platform publishing**
 - `carica_youtube.py` — upload with scheduled `publishAt`, tags/description/category,
-  quota handling and retries.
+  and explicit handling of the daily quota-exceeded error.
 - `carica_instagram.py` — Reels via the Meta Graph API: upload to S3-compatible
   storage (Cloudflare R2), container creation, polling, publish, comment, story.
 - `carica_tiktok.py` — Content Posting API, with a fallback to an inbox draft when
@@ -103,19 +117,27 @@ or slow detection.
 
 ## Notable engineering decisions
 
-- **Idempotency under concurrent runs**: publishers deduplicate both on filename and
-  on a stable item id (survives a rename after a retry), and use a file lock so two
-  runs of the same script never overlap.
+- **Deduplication across runs**: publishers deduplicate both on filename and on a stable
+  item id (which survives a rename after a retry), and take a file lock so two runs of
+  the same script never overlap.
+  **What this does not yet cover**, and it is the most interesting open problem in the
+  repo: the external effect happens *before* the local registry is written. If a platform
+  accepts the upload but the process dies before `save_uploads()`, the registry has no
+  record and a retry republishes. Closing that gap needs a transactional
+  `pending → external_id → confirmed` state written atomically, plus reconciliation
+  against the platform API before any retry — not a bigger lock.
 - **Lean prompts**: direction/brand/kit clauses are never hand-pasted into a prompt —
   they're expanded from a shared template, so they stay identical to themselves
   instead of drifting as ad-hoc fixes pile up over time.
 - **Free-first by default**: the pipeline always prefers whatever zero-cost format is
   available (already-paid-for content repurposed, free providers, local rendering)
-  and reserves paid AI generation for the one format that must always be fresh —
-  under a fixed spending cap and a hard retry limit per item.
+  and reserves paid AI generation for the one format that must always be fresh. The
+  per-run cost estimate is printed before generation; enforcing an actual budget ceiling
+  from recorded spend is not implemented yet.
 - **Per-format baselines, not global thresholds**: performance is scored against the
-  rolling median of the same format, because formats differ in scale by orders of
-  magnitude and a shared threshold would only produce noise.
+  median of the same format, because formats differ in scale by orders of magnitude and
+  a shared threshold would only produce noise. See the limitation noted under
+  `check_outliers.py` for what this baseline still gets wrong.
 
 ## Stack
 

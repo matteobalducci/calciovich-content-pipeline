@@ -3,3 +3,45 @@ __pycache__/
 *.pyo
 .DS_Store
 *.log
+
+# ---------------------------------------------------------------------------
+# Credentials and OAuth state — never commit.
+# This repo is public; a single `git add .` must not be able to publish a token.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*token*.json
+*client_secret*.json
+*credentials*.json
+meta_config.json
+tiktok_config.json
+r2_config.json
+service-account*.json
+*.pem
+*.key
+
+# ---------------------------------------------------------------------------
+# Runtime state and private editorial data (lives in the private repo)
+# ---------------------------------------------------------------------------
+output/
+app/data.json
+app/youtube-stats.json
+scene/
+vault/
+character-ref/
+piano.json
+*-uploads.json
+rotation-state.json
+
+# ---------------------------------------------------------------------------
+# Generated media
+# ---------------------------------------------------------------------------
+*.mp4
+*.mov
+*.mp3
+*.wav
+*.png
+*.jpg
+*.jpeg
+!docs/**/*.png
