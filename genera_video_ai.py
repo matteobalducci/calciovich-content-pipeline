@@ -38,6 +38,9 @@ USO
 import os, sys, re, json, time, argparse, mimetypes
 import urllib.request, urllib.error
 
+from budget import (DEFAULT_MAX_ATTEMPTS_PER_ITEM, DEFAULT_MONTHLY_CAP_USD,
+                    Budget, BudgetExceeded, TooManyAttempts)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REFS_DIR = os.path.join(HERE, "character-ref")
 REFS_MANIFEST = os.path.join(REFS_DIR, "manifest.json")
@@ -265,6 +268,11 @@ def main():
                     help="era del canone: espande {KIT} con kit_clauses[era] (vedi ai-content-queue.json)")
     ap.add_argument("--out", help="nome file di output (senza estensione)")
     ap.add_argument("--dry-run", action="store_true", help="mostra solo il piano/costo stimato, non genera nulla")
+    ap.add_argument("--budget-cap", type=float, default=DEFAULT_MONTHLY_CAP_USD,
+                    help=f"tetto di spesa mensile in dollari (default {DEFAULT_MONTHLY_CAP_USD:.0f})")
+    ap.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS_PER_ITEM,
+                    help="tentativi a pagamento massimi per lo stesso item "
+                         f"(default {DEFAULT_MAX_ATTEMPTS_PER_ITEM})")
     ap.add_argument("--config", default=os.path.join(HERE, "meta_config.json"))
     args = ap.parse_args()
 
@@ -288,9 +296,29 @@ def main():
         sys.exit(f"Risoluzione {args.resolution} non disponibile per il tier {args.tier}.")
     cost = args.duration * per_sec
     print(f"Piano: tier={args.tier}  risoluzione={args.resolution}  durata={args.duration}s  costo stimato=${cost:.2f}")
+
+    # BUGFIX 03/09 (audit Codex): il README prometteva un tetto di spesa e un
+    # limite di tentativi per item, e non esisteva nessuno dei due — qui si
+    # stampava una stima e basta. Ora la spesa e' registrata e il tetto e' vero.
+    ledger = Budget(OUTPUT_DIR, provider="piapi",
+                    monthly_cap_usd=args.budget_cap,
+                    max_attempts_per_item=args.max_attempts)
+    print(f"  {ledger.summary()}")
     if args.dry_run:
         print("DRY RUN: nessuna generazione eseguita.")
-        return
+        ledger.close()
+        return 0
+
+    item_key = args.out or (args.prompt or "")[:60]
+    try:
+        # Prenotazione PRIMA della chiamata: i soldi escono prima che possiamo
+        # registrarli, quindi il record deve venire per primo.
+        reservation = ledger.reserve(cost, item=item_key,
+                                     note=f"{args.tier} {args.resolution} {args.duration}s")
+    except (BudgetExceeded, TooManyAttempts) as e:
+        print(f"\n⛔ {e}")
+        ledger.close()
+        return 2
 
     cfg = load_config(args.config)
     ref_urls = load_asset_refs()
@@ -299,12 +327,32 @@ def main():
     out_path = os.path.join(OUTPUT_DIR, f"{out_name}.mp4")
 
     print(f"⬆️  Creo il task Seedance ({len(ref_urls)} riferimenti)…")
-    task_id = create_task(cfg, args.prompt, ref_urls, args.duration, args.resolution, args.tier)
+    try:
+        task_id = create_task(cfg, args.prompt, ref_urls, args.duration, args.resolution, args.tier)
+    except Exception as e:
+        # Il task non e' stato creato: il fornitore non ha lavorato, quindi la
+        # prenotazione si libera davvero.
+        reservation.release(note=f"task non creato: {str(e)[:120]}")
+        ledger.close()
+        raise
     print(f"    task_id: {task_id}\n⏳ Attendo il rendering…")
-    video_url = wait_task(cfg, task_id)
-    print(f"⬇️  Scarico: {video_url}")
-    download_video(video_url, out_path)
+    try:
+        video_url = wait_task(cfg, task_id)
+        print(f"⬇️  Scarico: {video_url}")
+        download_video(video_url, out_path)
+    except Exception as e:
+        # Il task ESISTE: molto probabilmente il fornitore ha generato e
+        # fatturato. La prenotazione resta a carico — sbagliare per eccesso di
+        # prudenza qui costa un po' di margine, sbagliare al contrario costa
+        # soldi non contati.
+        reservation.settle(note=f"task {task_id} creato ma non recuperato: {str(e)[:120]}")
+        ledger.close()
+        raise
+    reservation.settle(note=f"task {task_id}")
     print(f"✅ Fatto: {out_path}")
+    print(f"   {ledger.summary()}")
+    ledger.close()
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

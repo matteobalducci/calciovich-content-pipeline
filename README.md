@@ -141,9 +141,13 @@ or slow detection.
   instead of drifting as ad-hoc fixes pile up over time.
 - **Free-first by default**: the pipeline always prefers whatever zero-cost format is
   available (already-paid-for content repurposed, free providers, local rendering)
-  and reserves paid AI generation for the one format that must always be fresh. The
-  per-run cost estimate is printed before generation; enforcing an actual budget ceiling
-  from recorded spend is not implemented yet.
+  and reserves paid AI generation for the one format that must always be fresh, under a
+  **real** monthly cap (`budget.py`). The same reserve-then-settle shape as the publish
+  registry, for the same reason: the money leaves before the record is written, so the
+  record comes first. A reservation abandoned by a crash keeps counting — erring toward
+  under-spending, where the worst case is a generation postponed rather than an unnoticed
+  overrun. Attempts are counted per item, so one stubborn scene stops costing money
+  instead of retrying until the budget is gone.
 - **Per-format baselines, not global thresholds**: performance is scored against the
   median of the same format, because formats differ in scale by orders of magnitude and
   a shared threshold would only produce noise. See the limitation noted under
