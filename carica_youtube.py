@@ -309,7 +309,14 @@ def upload_one(youtube, p, args):
         status["containsSyntheticMedia"] = True
     body = {
         "snippet": {"title": p["title"], "description": desc_con_link(p["desc"]),
-                    "tags": p["tags"], "categoryId": str(args.category)},
+                    "tags": p["tags"], "categoryId": str(args.category),
+                    # AGGIUNTO 03/09: senza queste due, YouTube non sa in che
+                    # lingua e' parlato il video, quindi non genera i sottotitoli
+                    # automatici — e senza sottotitoli non puo' offrire ne'
+                    # traduzioni ne' doppiaggio. Per una storia narrata in
+                    # italiano e' il muro che la tiene dentro un solo mercato.
+                    "defaultLanguage": args.language,
+                    "defaultAudioLanguage": args.language},
         "status": status,
     }
     media = MediaFileUpload(p["path"], chunksize=8*1024*1024, resumable=True)
@@ -332,6 +339,10 @@ def main():
     ap.add_argument("--time", default="17:00", help="ora di pubblicazione (Europe/Rome), default 17:00")
     ap.add_argument("--privacy", default="private", choices=["private", "unlisted", "public"])
     ap.add_argument("--category", type=int, default=24, help="categoria YouTube (24=Entertainment)")
+    ap.add_argument("--language", default="it",
+                    help="lingua del parlato e dei metadati (default it) — senza questa "
+                         "YouTube non genera sottotitoli automatici, quindi niente "
+                         "traduzioni ne' doppiaggio")
     ap.add_argument("--limit", type=int, default=6, help="max upload per esecuzione (quota), default 6")
     ap.add_argument("--force", action="store_true", help="ricarica anche se già nel registro")
     ap.add_argument("--client", default=os.path.join(HERE, "youtube_client_secret.json"))
