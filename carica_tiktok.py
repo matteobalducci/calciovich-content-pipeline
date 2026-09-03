@@ -44,6 +44,7 @@ import os, sys, re, json, time, argparse, webbrowser, secrets, fcntl, contextlib
 import urllib.request, urllib.parse, urllib.error
 
 import upload_registry  # stato di pubblicazione condiviso (SQLite)
+from rotation_policy import RotationPolicy
 from publish_attempt import AlreadySettled, PublishAttempt, classify
 
 HERE = os.path.dirname(os.path.abspath(__file__))                 # .../08-video-engine
@@ -178,10 +179,19 @@ def build_plan(args):
     settled = {k for k, v in uploaded.items() if upload_registry.is_settled(v)}
     published_ids = {v.get("source_id") for v in uploaded.values()
                      if upload_registry.is_settled(v) and v.get("source_id")}
+    # BUGFIX 03/09: la pausa editoriale delle clip AI viveva solo in
+    # rotation-state.json e nel registro decisioni del coach, letti dalla
+    # sessione che PIANIFICA. I publisher non li guardavano, quindi il giorno
+    # dopo lo stop una clip Gol-AI e' uscita comunque.
+    policy = RotationPolicy(OUTPUT)
     plan = []
     for it in ready_items():
         key = file_key(it["file"])
         item_id = it.get("id")
+        motivo = policy.pause_reason(it.get("categoria"), it.get("file"))
+        if motivo and not args.force:
+            print(f"  ⏸  salto '{key}': formato in pausa — {motivo[:110]}")
+            continue
         if key in settled and not args.force:
             continue
         if item_id and item_id in published_ids and not args.force:
