@@ -67,13 +67,13 @@ UPLOADS = os.path.join(OUTPUT, "youtube-uploads.json")            # registro: co
 # Brand Account Calciovich (12 upload finiti li' tra il 26/08 e l'01/09).
 CALCIOVICH_CHANNEL_ID = "UCLPBYAv19aizEYX4MmXV7rA"
 
+# Solo i 2 scope minimi: gli altri 3 (aggiunti 21/08, rimossi 04/09) davano comunque
+# 403 "insufficient authentication scopes" su un'app non verificata e rompevano il
+# refresh del token: from_authorized_user_file(path, SCOPES) usa SCOPES per la
+# richiesta di refresh a Google indipendentemente dagli scope salvati nel file,
+# quindi chiedere scope mai concessi faceva fallire ogni refresh con RefreshError.
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload",
-          "https://www.googleapis.com/auth/youtube.readonly",
-          # aggiunti 21/08 per sbloccare: fix titoli/privacy duplicati, commenti
-          # sui video già pubblicati, dati reali di retention/CTR (yt-analytics)
-          "https://www.googleapis.com/auth/youtube",
-          "https://www.googleapis.com/auth/youtube.force-ssl",
-          "https://www.googleapis.com/auth/yt-analytics.readonly"]
+          "https://www.googleapis.com/auth/youtube.readonly"]
 
 # ---------------------------------------------------------------- dati & piano
 def ready_items():
@@ -446,6 +446,9 @@ def main():
     # cosi' le playlist restano sempre aggiunte senza un passo manuale a parte. Fuori dal lock
     # (gestisci_playlist.py ha la sua stessa logica idempotente, non serve serializzarlo) e
     # non bloccante: se fallisce, l'upload e' comunque andato a buon fine, si segnala e basta.
+    # NOTA 06/09: da quando SCOPES e' tornato a upload+readonly (vedi sopra), questo passo
+    # fallisce SEMPRE per scope insufficiente (playlistItems.insert richiede "youtube" pieno)
+    # — atteso, non un errore da investigare. Le playlist restano manuali da YouTube Studio.
     if any_uploaded:
         try:
             import subprocess

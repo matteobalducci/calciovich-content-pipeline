@@ -21,12 +21,21 @@ in automatico da carica_youtube.py a fine upload) — e' idempotente: aggiunge
 solo i video mancanti, non tocca l'ordine di quelli gia' in playlist, quindi
 si puo' rilanciare quante volte si vuole senza rischi.
 
-Usa lo stesso token/scope di carica_youtube.py (gia' ha "youtube" completo dal
-rescope del 21/08 — richiesto per creare/popolare playlist).
+Usa lo stesso token di carica_youtube.py — ma da 04/09 quel token porta solo
+youtube.upload + youtube.readonly (il rescope del 21/08 è stato tolto: rompeva
+il refresh, vedi carica_youtube.py). playlistItems.insert richiede lo scope
+"youtube" pieno, non coperto da upload/readonly, e quello scope su un'app non
+verificata dà comunque 403 anche quando concesso. Quindi questo script oggi
+FALLISCE SEMPRE con lo stesso RefreshError che il rescope-fix voleva
+eliminare, se girato con SCOPES allargato — motivo per cui SCOPES qui sotto è
+stato allineato ai 2 scope reali: fallisce con un errore di permessi chiaro
+invece di rompere il refresh del token condiviso con carica_youtube.py. La
+gestione playlist resta quindi manuale da YouTube Studio finché l'app non è
+verificata — stessa scelta già fatta per commenti e modifiche post-pubblicazione.
 
 USO
   python3 gestisci_playlist.py --dry-run     # mostra il piano, non tocca nulla
-  python3 gestisci_playlist.py               # crea/aggiorna per davvero
+  python3 gestisci_playlist.py               # crea/aggiorna per davvero (oggi fallisce per scope insufficiente)
 """
 import os, re, json, sys, argparse
 import googleapiclient.discovery
@@ -44,7 +53,6 @@ CAPITOLI_DIR = os.path.join(HERE, "..", "..", "04-capitoli")  # root del progett
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
-    "https://www.googleapis.com/auth/youtube",
 ]
 
 GOLAI_TITLE = "Gol Impossibili"
@@ -330,21 +338,40 @@ def main():
         print(f"La storia in formato esteso: {len(longform)} video in ordine "
               f"(libro-pN non ancora completa -> ep1-10 + libro-pN insieme)\n")
 
-    print("== Playlist 'Gol Impossibili' ==")
-    pid1 = sync_playlist(yt, GOLAI_TITLE, GOLAI_DESC, golai_ordered, args.dry_run)
-    print("\n== Playlist 'La storia in ordine' ==")
-    pid2 = sync_playlist(yt, STORY_TITLE, STORY_DESC, story_ids, args.dry_run)
-    print("\n== Playlist 'La storia in formato esteso' ==")
-    pid3 = sync_playlist(yt, LONGFORM_TITLE, LONGFORM_DESC, longform, args.dry_run)
-    if libro_only and pid3 != "DRY-RUN-ID":
-        # la serie libro-pN ha raggiunto l'ultimo capitolo: ep1-10 (formato precedente,
-        # gia' uno spoiler completo dall'inizio alla fine) esce dalla playlist, sostituita
-        # dalla narrazione ufficiale piu' recente - vedi diario-di-bordo.md 02/09.
-        ep_ids = [v["videoId"] for k, v in yt_uploads.items()
-                  if re.match(r"^ep\d+-", k) and v.get("videoId")]
-        n_removed = remove_from_playlist(yt, pid3, ep_ids, args.dry_run)
-        if n_removed:
-            print(f"    -> {n_removed} video di ep1-10 rimossi (libro-pN ora copre tutto il libro)")
+    try:
+        print("== Playlist 'Gol Impossibili' ==")
+        pid1 = sync_playlist(yt, GOLAI_TITLE, GOLAI_DESC, golai_ordered, args.dry_run)
+        print("\n== Playlist 'La storia in ordine' ==")
+        pid2 = sync_playlist(yt, STORY_TITLE, STORY_DESC, story_ids, args.dry_run)
+        print("\n== Playlist 'La storia in formato esteso' ==")
+        pid3 = sync_playlist(yt, LONGFORM_TITLE, LONGFORM_DESC, longform, args.dry_run)
+        if libro_only and pid3 != "DRY-RUN-ID":
+            # la serie libro-pN ha raggiunto l'ultimo capitolo: ep1-10 (formato precedente,
+            # gia' uno spoiler completo dall'inizio alla fine) esce dalla playlist, sostituita
+            # dalla narrazione ufficiale piu' recente - vedi diario-di-bordo.md 02/09.
+            ep_ids = [v["videoId"] for k, v in yt_uploads.items()
+                      if re.match(r"^ep\d+-", k) and v.get("videoId")]
+            n_removed = remove_from_playlist(yt, pid3, ep_ids, args.dry_run)
+            if n_removed:
+                print(f"    -> {n_removed} video di ep1-10 rimossi (libro-pN ora copre tutto il libro)")
+    except googleapiclient.errors.HttpError as e:
+        # scrivere in una playlist (playlists/playlistItems.insert/delete) richiede lo scope
+        # "youtube" pieno, non coperto da upload/readonly, e quello scope su un'app non
+        # verificata da' 403 anche quando concesso - vedi docstring in testa al file. Senza
+        # questo except il 403 usciva come traceback Python grezzo ad ogni upload riuscito.
+        # Un 403 puo' anche essere quota esaurita (quotaExceeded/dailyLimitExceeded), non
+        # scope insufficiente - distinti sul testo del messaggio, non solo sullo status,
+        # stesso approccio gia' usato in aggiorna_descrizioni.py.
+        msg = str(e)
+        if e.resp.status == 403 and "insufficient" in msg.lower():
+            sys.exit(
+                "\n⛔ Scope insufficiente per scrivere playlist (atteso, vedi la "
+                "docstring in testa al file).\n   Le playlist restano manuali da "
+                "YouTube Studio finche' l'app non e' verificata."
+            )
+        if "quota" in msg.lower():
+            sys.exit("\n⛔ Quota giornaliera esaurita: riprova domani.")
+        raise
 
     if not args.dry_run:
         os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)

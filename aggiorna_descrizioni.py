@@ -11,14 +11,16 @@ PERCHÉ ESISTE
   caricamenti (carica_youtube.desc_con_link), ma i video già online restano
   senza: sono l'88% del traffico del canale, senza alcun percorso d'acquisto.
 
-REQUISITO
+REQUISITO — oggi non soddisfatto
   Serve lo scope OAuth `youtube` o `youtube.force-ssl`: `videos.update` non è
-  coperto da `youtube.upload`. Se il token in cache ha solo upload+readonly
-  (com'era fino al 02/09), lancia prima:
-
-      python3 reauth_youtube.py
-
-  che rifà il consenso con gli scope allargati già dichiarati in SCOPES.
+  coperto da `youtube.upload`. Dal 04/09 il token è tornato stabilmente a
+  upload+readonly (il rescope del 21/08 rompeva il refresh — vedi
+  carica_youtube.py) e quello scope allargato, anche se richiesto di nuovo,
+  darebbe comunque 403 su un'app non verificata. `reauth_youtube.py` oggi NON
+  può sbloccare questo script: rifà il consenso con gli stessi 2 scope minimi
+  dichiarati in carica_youtube.SCOPES, non con quelli allargati. Aggiornare le
+  descrizioni dei video già pubblicati resta un'operazione manuale da YouTube
+  Studio, finché l'app non passa la verifica Google.
 
 USO
   python3 aggiorna_descrizioni.py --dry-run     # mostra cosa cambierebbe
@@ -130,9 +132,10 @@ def main():
             print(f"      ❌ {msg[:180]}")
             if "insufficientPermissions" in msg or "insufficient" in msg.lower():
                 sys.exit(
-                    "\n⛔ Il token non ha lo scope per modificare i video.\n"
-                    "   Lancia:  python3 reauth_youtube.py\n"
-                    "   e approva TUTTI i permessi, poi rilancia questo script."
+                    "\n⛔ Il token non ha lo scope per modificare i video (atteso: "
+                    "questo script richiede 'youtube' pieno, che l'app non verificata\n"
+                    "   non ottiene in modo affidabile — vedi il REQUISITO in testa al "
+                    "file). Aggiorna la descrizione a mano da YouTube Studio."
                 )
             if "quota" in msg.lower():
                 print("      Quota giornaliera esaurita: riprendi domani.")

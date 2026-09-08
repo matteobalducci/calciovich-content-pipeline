@@ -10,10 +10,14 @@ rotation, generates the video, renders a contact sheet for visual review, publis
 and updates registries, playlists and state as it goes. Orchestration is handled by an
 AI agent (Claude Code) driving the scripts in this repo.
 
-Two honest caveats about "unattended": the visual QC step **produces a contact sheet for
-a human to look at — it does not gate the publishers**, and TikTok publishing goes to an
+Three honest caveats about "unattended": the visual QC step **produces a contact sheet for
+a human to look at — it does not gate the publishers**; TikTok publishing goes to an
 Inbox draft that the account owner confirms in the app, because the project's TikTok app
-has not cleared platform audit. YouTube and Instagram publish without intervention.
+has not cleared platform audit; and automatic playlist maintenance currently fails by
+design — writing to a playlist needs a broader OAuth scope than this project's token
+carries, on purpose, after that broader scope previously caused a real production
+incident (a token resolving to the wrong channel). Playlists are curated manually until
+the app clears Google's verification. YouTube and Instagram publish without intervention.
 
 Alongside publishing, the system records what happens afterwards: a historical logger
 accumulates channel metrics with no retention cutoff, and an outlier detector scores
@@ -108,9 +112,12 @@ or slow detection.
   storage (Cloudflare R2), container creation, polling, publish, comment, story.
 - `carica_tiktok.py` — Content Posting API, with a fallback to an inbox draft when
   the app hasn't cleared the platform's audit yet.
-- `gestisci_playlist.py` — creates and maintains YouTube playlists (by content
-  series and by chronological order), including an automatic switch between two
-  formats once one supersedes the other in content coverage.
+- `gestisci_playlist.py` — designed to create and maintain YouTube playlists (by
+  content series and by chronological order), including an automatic switch
+  between two formats once one supersedes the other in content coverage. Currently
+  fails cleanly by design: writing to a playlist needs a broader OAuth scope than
+  the project's token carries on purpose (see the caveats above) — playlists are
+  curated manually today.
 - `rispondi_commenti.py` / `leggi_commenti.py` — comment-reply drafts in the
   character's voice, tuned per platform.
 
