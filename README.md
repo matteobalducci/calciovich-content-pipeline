@@ -35,8 +35,10 @@ flowchart LR
   G --> A["Assembly<br/>make_video.py · overlays"]
   A --> QC["Quality gate<br/>qc_video.py"]
   QC --> PUB["Publishers<br/>YouTube · Instagram · TikTok"]
-  PUB --> M["Metrics logger<br/>aggiorna_youtube_stats.py"]
+  PUB --> M["Channel metrics logger<br/>aggiorna_youtube_stats.py"]
+  PUB --> M2["Per-video metrics<br/>raccogli_metriche_video.py"]
   M --> TS[("Time series<br/>no retention cutoff")]
+  M2 --> TS
   TS --> OUT["Outlier detection<br/>check_outliers.py"]
   TS --> DASH["Dashboard<br/>app_server.py"]
   OUT --> P
@@ -54,6 +56,14 @@ not shipped.
   followers, running on a `LaunchAgent` schedule with **no retention cutoff**. Platform
   APIs expose rolling windows; keeping the full series locally is what makes trend and
   cohort analysis possible later.
+- **`raccogli_metriche_video.py`** — a per-video time series (`metriche_video.py`
+  extracts the fetch/classification logic shared with `check_outliers.py`, so there is
+  one source of truth for what a video's numbers are, not two that can quietly
+  disagree), one snapshot per run of the shared `LaunchAgent`, guarded against
+  overlapping executions the same way `carica_youtube.py` guards uploads (a
+  non-blocking file lock, not just "one writer" as an assumption — this repo has
+  already had a real incident from that exact gap). A freshness check surfaces in the
+  dashboard if a collection run goes missing, independent of the trigger it's watching.
 - **`check_outliers.py`** — compares the latest release in each format against the
   **median lifetime view count of previous releases in the same format** (YouTube Data
   API v3, `videos.list`), requiring at least 3 prior releases before it trusts the
@@ -172,20 +182,25 @@ imageio-ffmpeg)
 The pipeline's job today is production and publishing. The metrics it accumulates are
 still queried locally, from flat files, by a single-purpose dashboard — enough to answer
 "is this release off the scale?", not enough to answer anything about how an audience
-actually behaves over time.
+actually behaves over time. Four phases move that data onto a proper stack:
 
-The next phase moves that data onto a proper stack:
+1. **Per-video collection & reliability** *(done)* — `raccogli_metriche_video.py`, above.
+   The prerequisite for everything after it: a warehouse built on top of a collector with
+   an undetected multi-week gap in its history just inherits that gap silently.
+2. **Fix the outlier comparison itself** *(in progress)* — the known limitation below
+   (lifetime totals bias new releases toward `FAIL`) gets fixed at the source, using the
+   YouTube Analytics API's fixed post-publish windows instead of Data API lifetime
+   totals. Read-only credentials for this are deliberately isolated from the ones that
+   publish — the same "narrow, single-purpose OAuth scope" principle behind the caveat
+   about playlist writes above, applied to a new surface before it becomes a second one.
+3. **Ingestion into BigQuery** — the channel time series and per-release metrics, from
+   all three platforms, loaded on a schedule instead of read from local files, with
+   dimensional modelling over content, format, platform and date.
+4. **Looker** — reporting on top of the model, replacing the local dashboard.
 
-1. **Ingestion into BigQuery** — the channel time series and per-release metrics, from
-   all three platforms, loaded on a schedule instead of read from local files.
-2. **Dimensional modelling** — a warehouse layer over content, format, platform and
-   date, so performance can be sliced by dimensions the platform APIs don't expose
-   together.
-3. **Looker** — reporting on top of the model, replacing the local dashboard.
-
-The interesting questions only become answerable at that point: how retention differs by
-format across platforms, whether a release's early trajectory predicts its ceiling, and
-which content attributes correlate with sharing rather than with views.
+The interesting questions only become answerable once the warehouse lands: how retention
+differs by format across platforms, whether a release's early trajectory predicts its
+ceiling, and which content attributes correlate with sharing rather than with views.
 
 ## Repository scope
 

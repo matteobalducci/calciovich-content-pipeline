@@ -13,8 +13,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 QUEUE_PATH = os.path.join(HERE, "output", "ai-content-queue.json")
 IG_UPLOADS_PATH = os.path.join(HERE, "output", "instagram-uploads.json")
 KNOWN_ISSUES_PATH = os.path.join(HERE, "output", "known-issues.json")
+METRICHE_STORICO_PATH = os.path.join(HERE, "output", "metriche-video-storico.json")
 LAUNCHAGENTS = os.path.expanduser("~/Library/LaunchAgents")
 UPLOAD_PLIST_INSTALLED = os.path.join(LAUNCHAGENTS, "com.calciovich.upload.plist")
+
+METRICHE_WARN_HOURS = 36
+METRICHE_ERROR_HOURS = 72
 
 PLATFORM_KEYS = {"youtube": "youtube", "instagram": "instagram_media_id", "tiktok": "tiktok_publish_id"}
 
@@ -94,6 +98,49 @@ def _ig_retry_jobs():
     return out
 
 
+def _metriche_freshness_flag():
+    """Guardia di freschezza per raccogli_metriche_video.py (Fase 1 del layer
+    analytics). Calcolo a grana-ORE: e' un tipo di
+    controllo nuovo, non un riuso del confronto a grana-data usato sopra per
+    last_activity — a cadenza di 4 raccolte/giorno un controllo giornaliero
+    nasconderebbe un buco di quasi 24h prima di segnalarlo.
+
+    Verificata indipendentemente dal trigger di raccolta stesso: questa funzione
+    e' letta da app_server.py, che gira su un LaunchAgent separato e permanente
+    (KeepAlive/RunAtLoad), non innescato dalla stessa catena che raccoglie i
+    dati — la classe di buco che questa guardia deve rilevare e' proprio "il
+    trigger di raccolta non e' mai scattato", che una guardia agganciata allo
+    stesso trigger non potrebbe vedere."""
+    try:
+        records = json.load(open(METRICHE_STORICO_PATH, encoding="utf-8")).get("records", [])
+    except Exception:
+        records = []
+
+    if not records:
+        return {"level": "warn", "text": "Nessuna metrica video ancora raccolta "
+                "(raccogli_metriche_video.py non ha ancora prodotto uno storico)."}
+
+    latest = max((r.get("snapshot_at") for r in records if r.get("snapshot_at")), default=None)
+    if latest is None:
+        return None
+    try:
+        last_dt = datetime.datetime.fromisoformat(latest)
+    except ValueError:
+        return None
+
+    hours = (datetime.datetime.now() - last_dt).total_seconds() / 3600
+    if hours >= METRICHE_ERROR_HOURS:
+        return {"level": "error",
+                "text": f"Nessuna raccolta metriche video da {hours:.0f} ore "
+                        f"(ultima: {latest}) — controlla il LaunchAgent "
+                        f"com.calciovich.youtubestats."}
+    if hours >= METRICHE_WARN_HOURS:
+        return {"level": "warn",
+                "text": f"Raccolta metriche video in ritardo: ultima rilevazione "
+                        f"{hours:.0f} ore fa ({latest})."}
+    return None
+
+
 def compute_status():
     today = _today()
     items = _load_queue_items()
@@ -147,6 +194,10 @@ def compute_status():
     known_issues = _known_issues()
     for k in known_issues:
         flags.append({"level": k.get("level", "warn"), "text": k.get("text", "")})
+
+    metriche_flag = _metriche_freshness_flag()
+    if metriche_flag:
+        flags.append(metriche_flag)
 
     return {
         "generatedAt": datetime.datetime.now().isoformat(timespec="seconds"),
