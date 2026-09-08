@@ -135,8 +135,13 @@ def test_collection_lock_releases_cleanly_for_the_next_run(repo):
 def test_an_expired_token_degrades_cleanly_instead_of_crashing(repo, monkeypatch):
     """youtube_token.json e' condiviso con carica_youtube.py: se scade, questo script
     non puo' riaprire un browser (gira non presidiato via LaunchAgent). Deve saltare
-    il run senza propagare un traceback grezzo nel log."""
-    from google.auth.exceptions import RefreshError
+    il run senza propagare un traceback grezzo nel log.
+
+    Richiede google-auth: la CI di questo repo pubblico gira apposta senza SDK/
+    credenziali (solo logica pura, vedi .github/workflows/tests.yml) — questo test
+    gira dove il pacchetto e' installato (il repo privato di produzione)."""
+    google_auth_exceptions = pytest.importorskip("google.auth.exceptions")
+    RefreshError = google_auth_exceptions.RefreshError
 
     def boom(*a, **kw):
         raise RefreshError("token scaduto")

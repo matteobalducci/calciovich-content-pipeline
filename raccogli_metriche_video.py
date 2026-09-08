@@ -118,8 +118,16 @@ def _build_plan_or_none():
     lasciar propagare un traceback grezzo — degrada pulito, nessuna riga scritta in
     questo run. Il token si aggiorna comunque al prossimo giro di carica_youtube.py
     (che e' presidiato), quindi il prossimo run di questo script torna a funzionare
-    da solo, senza bisogno di un consenso separato per questo script."""
-    from google.auth.exceptions import RefreshError
+    da solo, senza bisogno di un consenso separato per questo script.
+
+    L'import e' avvolto in un ImportError perche' google-auth non e' un requisito per
+    il percorso senza errori (es. --dry-run con stats_override nei test): se manca,
+    RefreshError diventa una tupla vuota — non intercetta nulla, si comporta come se
+    questo except non ci fosse, e qualunque altro errore continua a propagare normale."""
+    try:
+        from google.auth.exceptions import RefreshError
+    except ImportError:
+        RefreshError = ()
     try:
         return build_plan()
     except RefreshError:
