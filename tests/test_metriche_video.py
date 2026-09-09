@@ -135,3 +135,73 @@ def test_stats_override_bypasses_any_credential_requirement(monkeypatch):
     monkeypatch.setattr(metriche_video, "TOKEN_PATH", "/percorso/che/non/esiste.json")
     frozen = {"xyz": {"views": 0, "likes": 0, "comments": 0, "privacy": "private"}}
     assert fetch_stats(["xyz"], stats_override=frozen) == frozen
+
+
+# --- load_confirmed_youtube_uploads(): bugfix dibattito di controllo Fase 3 --
+
+
+def test_load_confirmed_youtube_uploads_sees_a_video_confirmed_only_in_sqlite(tmp_path):
+    """Riprodotto dal dibattito di controllo Fase 3: dal commit 827ba65 (02/09) lo
+    stato di pubblicazione vive in SQLite, il JSON legacy non viene piu' aggiornato.
+    Un upload confermato dopo la migrazione non finisce mai nel JSON — se questa
+    funzione leggesse ancora il JSON, sparirebbe in silenzio."""
+    import upload_registry
+    from metriche_video import load_confirmed_youtube_uploads
+    path = tmp_path / "youtube-uploads.json"
+    reg = upload_registry.Registry(str(path))
+    reg.confirm("short99-nuovo.vert", external_id="vidNEW", videoId="vidNEW",
+                publishAt="2026-09-05T10:00:00Z")
+    reg.close()
+    assert not path.exists()  # esattamente lo scenario post-migrazione: nessun JSON scritto
+    uploads = load_confirmed_youtube_uploads(str(path))
+    assert uploads["short99-nuovo.vert"]["videoId"] == "vidNEW"
+
+
+def test_load_confirmed_youtube_uploads_excludes_pending_records(tmp_path):
+    """Un record pending e' un tentativo di upload non ancora risolto (vedi
+    upload_registry.py) — non un video da trattare come pubblicato."""
+    import upload_registry
+    from metriche_video import load_confirmed_youtube_uploads
+    path = tmp_path / "youtube-uploads.json"
+    reg = upload_registry.Registry(str(path))
+    reg.begin("short100-in-corso.vert", videoId="vidPENDING")
+    reg.close()
+    assert load_confirmed_youtube_uploads(str(path)) == {}
+
+
+def test_load_confirmed_youtube_uploads_falls_back_to_external_id_after_a_reconcile(tmp_path):
+    """Riprodotto dal secondo giro del dibattito di controllo: Registry.reconcile()
+    (chiamato ad OGNI run di carica_youtube.py per recuperare i pending lasciati da
+    un crash/timeout precedente) conferma con confirm(key, external_id, recoveredAt=...)
+    — external_id finisce nella colonna riservata, mai in meta["videoId"]. Senza il
+    fallback il record resta CONFIRMED ma sparisce comunque, la stessa classe di bug
+    del primo fix, solo spostata qui."""
+    import upload_registry
+    from metriche_video import load_confirmed_youtube_uploads
+    path = tmp_path / "youtube-uploads.json"
+    reg = upload_registry.Registry(str(path))
+    reg.begin("short101-recuperato.vert")  # pending, come lasciato da un crash
+    reg.close()
+
+    reg = upload_registry.Registry(str(path))
+
+    def probe_finds_it_on_youtube(key, record):
+        return "vidRECUPERATO"
+
+    reg.reconcile(probe_finds_it_on_youtube)  # simula carica_youtube.py::reconcile_pending()
+    reg.close()
+
+    uploads = load_confirmed_youtube_uploads(str(path))
+    assert uploads["short101-recuperato.vert"]["videoId"] == "vidRECUPERATO"
+
+
+def test_load_confirmed_youtube_uploads_still_picks_up_legacy_json_entries(tmp_path):
+    """Pre-migrazione: i record importati dal JSON legacy sono trattati come
+    CONFIRMED di default (upload_registry.state_of()) — non deve regredire il
+    comportamento gia' in produzione per gli upload storici."""
+    import json
+    from metriche_video import load_confirmed_youtube_uploads
+    path = tmp_path / "youtube-uploads.json"
+    path.write_text(json.dumps({"short01-x.vert": {"videoId": "vidOLD"}}))
+    uploads = load_confirmed_youtube_uploads(str(path))
+    assert uploads["short01-x.vert"]["videoId"] == "vidOLD"

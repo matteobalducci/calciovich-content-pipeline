@@ -30,7 +30,7 @@ USO
 import os, sys, json, statistics
 
 import upload_registry  # usato direttamente per upload_registry.save(OUT, ...) sotto
-from metriche_video import load, categoria, _app_data_categoria_map, fetch_stats
+from metriche_video import categoria, _app_data_categoria_map, fetch_stats, load_confirmed_youtube_uploads
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 YT_UPLOADS = os.path.join(HERE, "output", "youtube-uploads.json")
@@ -89,7 +89,7 @@ def _choose_comparison(history, latest, views_day1_by_video):
 def main():
     apply_changes = "--apply" in sys.argv
 
-    uploads = load(YT_UPLOADS, {})
+    uploads = load_confirmed_youtube_uploads(YT_UPLOADS)
     app_map = _app_data_categoria_map()
     # ordina per data di pubblicazione effettiva (publishAt se presente e passato, altrimenti uploadedAt)
     entries = []

@@ -15,7 +15,15 @@ nello stesso giorno divergono legittimamente — nessuno dei due e' "piu' autore
 
 USO
   python3 raccogli_metriche_video.py            # raccoglie e scrive lo storico
-  python3 raccogli_metriche_video.py --dry-run   # mostra il piano, non scrive nulla
+  python3 raccogli_metriche_video.py --dry-run   # mostra il piano — non scrive lo
+                                                  # storico, ma la PRIMA apertura di
+                                                  # Registry su un checkout pulito
+                                                  # (publish-state.db non ancora
+                                                  # creato, youtube-uploads.json si')
+                                                  # importa quel JSON come righe vere
+                                                  # nel DB (comportamento di Registry,
+                                                  # non introdotto da --dry-run) —
+                                                  # non e' "zero scritture" in quel caso
 """
 import contextlib
 import fcntl
@@ -24,7 +32,8 @@ import sys
 from datetime import datetime
 
 import upload_registry
-from metriche_video import categoria, _app_data_categoria_map, fetch_stats, load
+from metriche_video import (categoria, _app_data_categoria_map, fetch_stats, load,
+                             load_confirmed_youtube_uploads)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT = os.path.join(HERE, "output")
@@ -60,7 +69,7 @@ def build_plan(stats_override=None):
 
     stats_override e' inoltrato a fetch_stats() com'e': parametro esplicito, non
     monkeypatching — stesso meccanismo di test_metriche_video.py."""
-    uploads = load(YT_UPLOADS, {})
+    uploads = load_confirmed_youtube_uploads(YT_UPLOADS)
     app_map = _app_data_categoria_map()
 
     entries = []

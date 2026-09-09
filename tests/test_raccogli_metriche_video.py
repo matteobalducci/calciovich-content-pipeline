@@ -40,6 +40,27 @@ def write_uploads(repo, uploads):
     (repo / "youtube-uploads.json").write_text(json.dumps(uploads))
 
 
+def confirm_in_registry(repo, key, video_id, **meta):
+    """Simula un upload confermato DOPO la migrazione a SQLite (827ba65, 02/09):
+    mai scritto nel JSON legacy, solo in publish-state.db — esattamente lo
+    scenario che load_confirmed_youtube_uploads() deve vedere."""
+    import upload_registry
+    reg = upload_registry.Registry(str(repo / "youtube-uploads.json"))
+    reg.confirm(key, external_id=video_id, videoId=video_id, **meta)
+    reg.close()
+
+
+# --- bugfix dibattito di controllo Fase 3: fonte SQLite, non solo JSON -----
+
+
+def test_build_plan_sees_an_upload_confirmed_only_in_sqlite_not_in_the_legacy_json(repo):
+    confirm_in_registry(repo, "short99-nuovo.vert", "vidNEW")
+    assert not (repo / "youtube-uploads.json").exists()
+    stats = {"vidNEW": {"views": 5, "likes": 0, "comments": 0, "privacy": "public"}}
+    _, rows = rmv.build_plan(stats_override=stats)
+    assert [r["video_id"] for r in rows] == ["vidNEW"]
+
+
 # --- build_plan(): filtro pubblico + forma della riga -----------------------
 
 

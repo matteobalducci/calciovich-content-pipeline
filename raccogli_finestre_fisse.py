@@ -24,10 +24,17 @@ salta pulito. Il consenso successivo e' un passo umano (youtube_analytics_auth.p
 
 USO
   python3 raccogli_finestre_fisse.py            # raccoglie e aggiorna lo storico
-  python3 raccogli_finestre_fisse.py --dry-run   # mostra il piano, non scrive nulla
-                                                  # (fa comunque le chiamate reali
-                                                  # all'API — solo la scrittura su
-                                                  # disco e' saltata)
+  python3 raccogli_finestre_fisse.py --dry-run   # mostra il piano — non scrive lo
+                                                  # storico delle finestre, fa
+                                                  # comunque le chiamate reali
+                                                  # all'API, e la PRIMA apertura di
+                                                  # Registry su un checkout pulito
+                                                  # (publish-state.db non ancora
+                                                  # creato, youtube-uploads.json si')
+                                                  # importa quel JSON come righe vere
+                                                  # nel DB (comportamento di Registry,
+                                                  # non introdotto da --dry-run) —
+                                                  # non e' "zero scritture" in quel caso
 """
 import contextlib
 import fcntl
@@ -37,7 +44,7 @@ from datetime import date, datetime
 
 import upload_registry
 import youtube_analytics_auth
-from metriche_video import fetch_fixed_windows, load
+from metriche_video import fetch_fixed_windows, load, load_confirmed_youtube_uploads
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT = os.path.join(HERE, "output")
@@ -93,7 +100,7 @@ def build_plan(analytics_creds, today=None, windows_override=None):
     if today is None:
         today = date.today()
 
-    uploads = load(YT_UPLOADS, {})
+    uploads = load_confirmed_youtube_uploads(YT_UPLOADS)
     updates = []
     for key, meta in uploads.items():
         vid = meta.get("videoId")
