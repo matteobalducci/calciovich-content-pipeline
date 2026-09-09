@@ -23,7 +23,7 @@ USO
   python3 check_outliers.py                # stampa il report e scrive outlier-flags.json
   python3 check_outliers.py --apply         # DEPRECATO: i FAIL non sospendono piu'
                                             # nulla da soli (vedi la nota nel codice).
-                                            # Restava per: 
+                                            # Restava per:
                                              # rotation-state.json / ai-content-queue.json
                                              # (stesso meccanismo gia' usato per vecio_dixe/tomasito)
 """
@@ -37,10 +37,47 @@ YT_UPLOADS = os.path.join(HERE, "output", "youtube-uploads.json")
 ROTATION = os.path.join(HERE, "output", "rotation-state.json")
 QUEUE = os.path.join(HERE, "output", "ai-content-queue.json")
 OUT = os.path.join(HERE, "output", "outlier-flags.json")
+FINESTRE_FISSE = os.path.join(HERE, "output", "metriche-finestre-fisse.json")
 
 WIN_MULT = 5.0
 FAIL_MULT = 0.2
 MIN_HISTORY = 3  # servono almeno 3 uscite precedenti nello stesso formato per fidarsi della mediana
+
+
+def _views_day1_by_video(finestre_records):
+    """{video_id: views_day1} per i video che ce l'hanno (Fase 2, YouTube Analytics
+    API — vedi metriche_video.fetch_fixed_windows()). Il file puo' non esistere
+    ancora (Fase 2 mai girata) o essere illeggibile: e' un dato opzionale che
+    migliora il confronto quando c'e', non un requisito — degrada a nessun dato
+    fisso, mai a un crash di check_outliers.py."""
+    out = {}
+    for vid, rec in finestre_records.items():
+        d1 = rec.get("views_day1")
+        if d1 is not None:
+            out[vid] = d1
+    return out
+
+
+def _choose_comparison(history, latest, views_day1_by_video):
+    """Ritorna (v_latest, mediana, base) — base e' 'views_day1' o 'lifetime'.
+
+    BUGFIX statistico (Fase 2): la
+    finestra fissa si usa SOLO se sia il video piu' recente SIA un campione omogeneo
+    di storia (>= MIN_HISTORY video, tutti con views_day1) ce l'hanno — mai un mix
+    fisso/lifetime nella stessa mediana, che reintrodurrebbe lo stesso bias dentro
+    il calcolo invece che fra latest e mediana. Se manca anche solo uno dei due lati,
+    resta il confronto lifetime-vs-lifetime di sempre — nessuna forzatura."""
+    _, _, latest_vid, latest_lifetime = latest
+    latest_day1 = views_day1_by_video.get(latest_vid)
+
+    if latest_day1 is not None:
+        history_day1 = [views_day1_by_video[vid] for *_, vid, _ in history
+                         if vid in views_day1_by_video]
+        if len(history_day1) >= MIN_HISTORY:
+            return latest_day1, statistics.median(history_day1), "views_day1"
+
+    return latest_lifetime, statistics.median(v for *_, v in history), "lifetime"
+
 
 def main():
     apply_changes = "--apply" in sys.argv
@@ -73,14 +110,20 @@ def main():
             continue  # non ancora live (schedulato/privato): 0 view non e' un FAIL, e' "non ancora uscito"
         by_cat.setdefault(cat, []).append((data_ord, key, vid, v))
 
+    try:
+        finestre_records = json.load(open(FINESTRE_FISSE, encoding="utf-8")).get("records", {})
+    except Exception:
+        finestre_records = {}  # Fase 2 mai girata, o file illeggibile — degrada a lifetime
+    views_day1_by_video = _views_day1_by_video(finestre_records)
+
     flags = []
     print()
     for cat, items in by_cat.items():
         if len(items) < MIN_HISTORY + 1:
             continue
         *history, latest = items
-        med = statistics.median(v for *_, v in history)
-        _, key, vid, v = latest
+        v, med, base = _choose_comparison(history, latest, views_day1_by_video)
+        _, key, vid, _ = latest
         if med <= 0:
             continue
         ratio = v / med
@@ -89,11 +132,13 @@ def main():
             tag = "WIN"
         elif ratio <= FAIL_MULT:
             tag = "FAIL"
+        base_note = " (finestra 24h)" if base == "views_day1" else ""
         marker = f" ⚠️ {tag} OUTLIER (x{ratio:.1f} vs mediana {med:.0f})" if tag else ""
-        print(f"[{cat}] {key}: {v} views (mediana formato: {med:.0f}){marker}")
+        print(f"[{cat}] {key}: {v} views{base_note} (mediana formato: {med:.0f}){marker}")
         if tag:
             flags.append({"categoria": cat, "key": key, "videoId": vid, "views": v,
-                           "mediana": med, "ratio": round(ratio, 2), "tipo": tag})
+                           "mediana": med, "ratio": round(ratio, 2), "tipo": tag,
+                           "base": base})
 
     if not flags:
         print("\nNessun outlier evidente oggi.")
@@ -107,27 +152,31 @@ def main():
                                "flags": flags})
 
     if apply_changes:
-        # BUGFIX 02/09 — LIMITE STATISTICO NOTO: il confronto e' fra le view
-        # LIFETIME di video vecchi e quelle di un video appena uscito, che ha
-        # avuto poche ore per accumularle. Un video nuovo e' quindi
-        # strutturalmente spinto verso FAIL, e con --apply questo bastava a
-        # SOSPENDERE automaticamente un formato. Un falso positivo che spegne un
-        # formato costa molto piu' di un vero positivo scoperto un giorno dopo.
+        # BUGFIX 02/09 — LIMITE STATISTICO NOTO: il confronto fra view LIFETIME di
+        # video vecchi e quelle di un video appena uscito e' strutturalmente
+        # sbilanciato verso FAIL, e con --apply questo bastava a SOSPENDERE
+        # automaticamente un formato. Un falso positivo che spegne un formato
+        # costa molto piu' di un vero positivo scoperto un giorno dopo.
         #
-        # Finche' il confronto non passa a finestre fisse dalla pubblicazione
-        # (view a 24/48/168 ore, che richiedono la Analytics API — vedi la fase
-        # BigQuery), i FAIL non modificano piu' nulla da soli: si segnalano e
-        # basta. I WIN non sono simmetrici, perche' un falso WIN non spegne
-        # niente.
+        # _choose_comparison() ora usa la finestra fissa a 24h (YouTube Analytics
+        # API) quando sia il video piu' recente sia un campione omogeneo di storia
+        # (>= MIN_HISTORY video) ce l'hanno — ma finche' quel campione non e'
+        # abbastanza numeroso il confronto resta lifetime-vs-lifetime, quindi il
+        # bias sopra puo' ancora presentarsi. --apply resta deprecato per lo
+        # stesso motivo di sempre: un FAIL non deve sospendere nulla da solo finche'
+        # non c'e' garanzia che il confronto sia quello corretto. I FAIL si
+        # segnalano e basta. I WIN non sono simmetrici, perche' un falso WIN non
+        # spegne niente.
         fails = [f for f in flags if f["tipo"] == "FAIL"]
         if fails:
             print("\n⚠️  FAIL rilevati, NON applicati automaticamente:")
             for f in fails:
-                print(f"   • {f['key']} ({f['categoria']}): {f['views']} views, "
+                base_note = " (finestra 24h)" if f.get("base") == "views_day1" else " (lifetime)"
+                print(f"   • {f['key']} ({f['categoria']}): {f['views']} views{base_note}, "
                       f"x{f['ratio']} vs mediana {f['mediana']:.0f}")
-            print("   Il confronto con le view lifetime penalizza i video appena usciti.")
-            print("   Verifica l'eta' del video prima di decidere; per sospendere davvero "
-                  "un formato, modifica rotation-state.json a mano.")
+            print("   Il confronto lifetime penalizza i video appena usciti — verifica se il")
+            print("   FAIL qui sopra è a finestra fissa o a lifetime prima di decidere; per")
+            print("   sospendere davvero un formato, modifica rotation-state.json a mano.")
         wins = [f for f in flags if f["tipo"] == "WIN"]
         if wins:
             print("  → WIN outlier: nessuna modifica automatica di stato, va solo preferito nel prossimo slot eleggibile dello stesso formato (decisione della sessione che pubblica).")

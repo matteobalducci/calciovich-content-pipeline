@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 metriche_video.py — classificazione per-formato e recupero statistiche YouTube,
-condivisi fra check_outliers.py e raccogli_metriche_video.py (Fase 1 del layer
-analytics).
+condivisi fra check_outliers.py e raccogli_metriche_video.py.
 
 Estratto da check_outliers.py senza cambiarne il comportamento osservabile —
 check_outliers.py importa da qui invece di ridefinire la stessa logica.
 """
 import os, sys, re
+from datetime import date, timedelta
 
 import upload_registry  # scrittura/lettura atomica
 
@@ -116,3 +116,60 @@ def fetch_stats(video_ids, stats_override=None):
                 "privacy": privacy,
             }
     return out
+
+
+def fetch_fixed_windows(video_id, publish_date, analytics_creds=None,
+                        window_override=None, today=None):
+    """Ritorna {"views_day1", "views_day2", "views_day7"} — cumulato dai bucket
+    giornalieri di reports().query() dal giorno di pubblicazione. Ogni finestra e'
+    None finche' il video non ha raggiunto quell'eta' (non un finto zero).
+
+    Per-video, non batched: verificato con una chiamata reale che
+    reports().query() risponde 400 Bad Request senza filters=video==ID — la YouTube
+    Analytics API non offre un equivalente batched per questo report, a differenza
+    della Data API (fetch_stats, chunk da 50).
+
+    window_override e' iniettabile per i test di caratterizzazione: se passato, e'
+    il dict {data_iso: views} che l'API avrebbe restituito per questo video — la
+    logica di eta'/cumulato gira invariata sopra, isolando l'effetto della rete dal
+    resto. today e' iniettabile allo stesso modo (default date.today())."""
+    if isinstance(publish_date, str):
+        publish_date = date.fromisoformat(publish_date)
+    if today is None:
+        today = date.today()
+    age = (today - publish_date).days
+
+    if window_override is not None:
+        daily_views = window_override
+    else:
+        import googleapiclient.discovery
+        yt_analytics = googleapiclient.discovery.build(
+            "youtubeAnalytics", "v2", credentials=analytics_creds
+        )
+        end_date = min(today, publish_date + timedelta(days=7))
+        resp = yt_analytics.reports().query(
+            ids="channel==MINE",
+            startDate=publish_date.isoformat(),
+            endDate=end_date.isoformat(),
+            metrics="views",
+            dimensions="day",
+            filters=f"video=={video_id}",
+            sort="day",
+        ).execute()
+        daily_views = {row[0]: row[1] for row in resp.get("rows", [])}
+
+    def cumulative_through(n_days):
+        total = 0
+        found_any = False
+        for i in range(n_days):
+            d = (publish_date + timedelta(days=i)).isoformat()
+            if d in daily_views:
+                total += daily_views[d]
+                found_any = True
+        return total if found_any else None
+
+    return {
+        "views_day1": cumulative_through(1) if age >= 1 else None,
+        "views_day2": cumulative_through(2) if age >= 2 else None,
+        "views_day7": cumulative_through(7) if age >= 7 else None,
+    }

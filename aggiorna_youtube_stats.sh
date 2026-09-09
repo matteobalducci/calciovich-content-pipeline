@@ -9,3 +9,4 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
 cd "$(dirname "$0")" || exit 1
 /usr/bin/python3 aggiorna_youtube_stats.py
 /usr/bin/python3 raccogli_metriche_video.py
+/usr/bin/python3 raccogli_finestre_fisse.py

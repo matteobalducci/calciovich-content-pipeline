@@ -71,13 +71,26 @@ not shipped.
   short-form clip and a long-form episode have distributions that can differ by two
   orders of magnitude, so a single global threshold produces nothing but false signals.
 
-  **Known limitation, stated deliberately:** comparing a hours-old video against the
+  **Known limitation, partially addressed:** comparing a hours-old video against the
   *lifetime* totals of older ones is not a valid comparison — a new release is
-  structurally biased toward `FAIL`. The statistically correct version compares a fixed
-  window from each video's own publication (views at 24h / 48h / 168h), which requires
-  the Analytics API rather than Data API totals. That is part of the warehouse work in
-  the [Roadmap](#roadmap); until then the `FAIL` side of this signal should be read as a
-  prompt to look, not as a verdict.
+  structurally biased toward `FAIL`. `raccogli_finestre_fisse.py` now pulls a fixed
+  post-publish window (views at 24h / 48h / 168h) via the YouTube Analytics API — an
+  OAuth token isolated from the one that publishes, on its own GCP project, so an
+  expired or never-granted consent degrades to a status flag on the dashboard instead
+  of touching publishing. `check_outliers.py` uses that window only when *both* the
+  latest release and a same-format history of at least 3 prior releases have it —
+  never a mix of fixed-window and lifetime numbers in the same median, which would
+  just reintroduce the bias one level down. Until a format has accumulated enough
+  same-window history, the comparison falls back to lifetime unchanged, and that
+  `FAIL` side should still be read as a prompt to look, not as a verdict.
+- **`raccogli_finestre_fisse.py`** — the fixed post-publish windows that fix the known
+  limitation above, via the YouTube Analytics API. Its OAuth token is isolated on its
+  own GCP project, never shared with the one that publishes — a lesson from a real
+  incident where a broadened scope on the publishing token resolved to the wrong
+  channel. Updates a window while a video is still within it (Analytics data on the
+  most recent days can still be revised), freezes once it isn't; an expired or
+  never-granted consent writes a status flag for the dashboard and skips the run
+  cleanly instead of trying to open a browser from an unattended process.
 - **`app_server.py`** — local HTTP server backing a dashboard over pipeline state and
   the accumulated metrics, regenerating its data on every start.
 
@@ -187,12 +200,14 @@ actually behaves over time. Four phases move that data onto a proper stack:
 1. **Per-video collection & reliability** *(done)* — `raccogli_metriche_video.py`, above.
    The prerequisite for everything after it: a warehouse built on top of a collector with
    an undetected multi-week gap in its history just inherits that gap silently.
-2. **Fix the outlier comparison itself** *(in progress)* — the known limitation below
-   (lifetime totals bias new releases toward `FAIL`) gets fixed at the source, using the
-   YouTube Analytics API's fixed post-publish windows instead of Data API lifetime
-   totals. Read-only credentials for this are deliberately isolated from the ones that
-   publish — the same "narrow, single-purpose OAuth scope" principle behind the caveat
-   about playlist writes above, applied to a new surface before it becomes a second one.
+2. **Fix the outlier comparison itself** *(done, gated by history)* — the known
+   limitation above (lifetime totals bias new releases toward `FAIL`) is fixed at the
+   source, using the YouTube Analytics API's fixed post-publish windows instead of Data
+   API lifetime totals — but only kicks in once a format has enough same-window history;
+   until then the comparison stays on lifetime totals, by design. Read-only credentials
+   for this are isolated from the ones that publish — the same "narrow, single-purpose
+   OAuth scope" principle behind the caveat about playlist writes above, applied to a
+   new surface before it becomes a second one.
 3. **Ingestion into BigQuery** — the channel time series and per-release metrics, from
    all three platforms, loaded on a schedule instead of read from local files, with
    dimensional modelling over content, format, platform and date.

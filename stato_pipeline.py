@@ -14,6 +14,7 @@ QUEUE_PATH = os.path.join(HERE, "output", "ai-content-queue.json")
 IG_UPLOADS_PATH = os.path.join(HERE, "output", "instagram-uploads.json")
 KNOWN_ISSUES_PATH = os.path.join(HERE, "output", "known-issues.json")
 METRICHE_STORICO_PATH = os.path.join(HERE, "output", "metriche-video-storico.json")
+ANALYTICS_CONSENT_STATUS_PATH = os.path.join(HERE, "output", "analytics-consent-status.json")
 LAUNCHAGENTS = os.path.expanduser("~/Library/LaunchAgents")
 UPLOAD_PLIST_INSTALLED = os.path.join(LAUNCHAGENTS, "com.calciovich.upload.plist")
 
@@ -99,8 +100,7 @@ def _ig_retry_jobs():
 
 
 def _metriche_freshness_flag():
-    """Guardia di freschezza per raccogli_metriche_video.py (Fase 1 del layer
-    analytics). Calcolo a grana-ORE: e' un tipo di
+    """Guardia di freschezza per raccogli_metriche_video.py. Calcolo a grana-ORE: e' un tipo di
     controllo nuovo, non un riuso del confronto a grana-data usato sopra per
     last_activity — a cadenza di 4 raccolte/giorno un controllo giornaliero
     nasconderebbe un buco di quasi 24h prima di segnalarlo.
@@ -139,6 +139,32 @@ def _metriche_freshness_flag():
                 "text": f"Raccolta metriche video in ritardo: ultima rilevazione "
                         f"{hours:.0f} ore fa ({latest})."}
     return None
+
+
+def _analytics_consent_flag():
+    """Guardia di consenso per raccogli_finestre_fisse.py (Fase 2 del layer
+    analytics). Non un riuso di _metriche_freshness_flag(): risponde a una domanda
+    diversa — "serve un consenso umano", non "il dato è vecchio". Il token Analytics
+    è dedicato e isolato da carica_youtube.py: se scade o non è mai stato concesso,
+    nessun altro script della pipeline lo rinnova da solo (a differenza del token
+    condiviso di Fase 1, che si autoripara al prossimo consenso presidiato di
+    carica_youtube.py).
+
+    Tre stati, deliberatamente non simmetrici: file assente → nessun flag (la Fase 2
+    non ha ancora girato una volta — non è un errore da segnalare, la guardia di
+    freschezza generica già copre "nessun dato mai" senza bisogno di duplicarlo
+    qui); consent_needed False → nessun flag; consent_needed True → il flag error
+    sotto."""
+    try:
+        status = json.load(open(ANALYTICS_CONSENT_STATUS_PATH, encoding="utf-8"))
+    except Exception:
+        return None
+
+    if not status.get("consent_needed"):
+        return None
+    return {"level": "error",
+            "text": "Serve un nuovo consenso YouTube Analytics — rilancia "
+                    "youtube_analytics_auth.py da un terminale con browser."}
 
 
 def compute_status():
@@ -198,6 +224,10 @@ def compute_status():
     metriche_flag = _metriche_freshness_flag()
     if metriche_flag:
         flags.append(metriche_flag)
+
+    consent_flag = _analytics_consent_flag()
+    if consent_flag:
+        flags.append(consent_flag)
 
     return {
         "generatedAt": datetime.datetime.now().isoformat(timespec="seconds"),
