@@ -1,5 +1,4 @@
-"""Guardia di freschezza per raccogli_metriche_video.py (Fase 1 del layer
-analytics).
+"""Guardia di freschezza per raccogli_metriche_video.py.
 
 WHY THIS EXISTS
 ----------------
@@ -74,6 +73,8 @@ def test_compute_status_surfaces_the_freshness_flag_in_the_dashboard(tmp_path, m
     very_stale = (datetime.datetime.now() - datetime.timedelta(hours=80)).isoformat(timespec="seconds")
     write_storico(storico, [very_stale])
     monkeypatch.setattr(stato_pipeline, "METRICHE_STORICO_PATH", str(storico))
+    monkeypatch.setattr(stato_pipeline, "ANALYTICS_CONSENT_STATUS_PATH", str(tmp_path / "no-consent.json"))
+    monkeypatch.setattr(stato_pipeline, "FINESTRE_FISSE_PATH", str(tmp_path / "no-finestre.json"))
     monkeypatch.setattr(stato_pipeline, "QUEUE_PATH", str(tmp_path / "no-queue.json"))
     monkeypatch.setattr(stato_pipeline, "IG_UPLOADS_PATH", str(tmp_path / "no-ig.json"))
     monkeypatch.setattr(stato_pipeline, "KNOWN_ISSUES_PATH", str(tmp_path / "no-issues.json"))

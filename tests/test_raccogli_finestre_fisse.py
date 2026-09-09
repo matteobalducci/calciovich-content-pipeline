@@ -100,6 +100,43 @@ def test_build_plan_skips_uploads_with_no_publish_date(repo):
     assert updates == []
 
 
+def test_a_malformed_publish_date_is_skipped_not_a_crash_for_the_whole_batch(repo):
+    """Riprodotto dal dibattito di controllo: un solo publishAt rotto non deve
+    affondare la raccolta per tutti gli altri video."""
+    write_uploads(repo, {
+        "broken": {"videoId": "v-broken", "publishAt": "N/D"},
+        "ok": {"videoId": "v-ok", "publishAt": "2026-07-05T15:00:00Z"},
+    })
+    updates = rff.build_plan(
+        analytics_creds=None, today=date(2026, 7, 6),
+        windows_override={"v-ok": {"2026-07-05": 10}},
+    )
+    assert [u[0] for u in updates] == ["v-ok"]
+
+
+def test_a_per_video_api_error_is_skipped_not_a_crash_for_the_whole_batch(repo, monkeypatch):
+    """Riprodotto dal dibattito di controllo: un errore dell'API (rete, quota,
+    video cancellato) su un video non deve affondare gli altri nello stesso run."""
+    write_uploads(repo, {
+        "boom": {"videoId": "v-boom", "publishAt": "2026-07-05T15:00:00Z"},
+        "ok": {"videoId": "v-ok", "publishAt": "2026-07-05T15:00:00Z"},
+    })
+
+    real_fetch = rff.fetch_fixed_windows
+
+    def flaky_fetch(vid, *a, **kw):
+        if vid == "v-boom":
+            raise RuntimeError("errore API simulato")
+        return real_fetch(vid, *a, **kw)
+
+    monkeypatch.setattr(rff, "fetch_fixed_windows", flaky_fetch)
+    updates = rff.build_plan(
+        analytics_creds=None, today=date(2026, 7, 6),
+        windows_override={"v-boom": {"2026-07-05": 1}, "v-ok": {"2026-07-05": 10}},
+    )
+    assert [u[0] for u in updates] == ["v-ok"]
+
+
 # --- merge_windows(): un campo congelato non deve mai regredire -------------
 
 
@@ -156,6 +193,28 @@ def test_a_working_consent_writes_consent_needed_false(repo, monkeypatch):
     rff.main()
     status = json.load(open(rff.CONSENT_STATUS))
     assert status["consent_needed"] is False
+
+
+def test_a_successful_run_writes_last_run_at(repo, monkeypatch):
+    write_uploads(repo, {})
+    monkeypatch.setattr(rff.youtube_analytics_auth, "get_analytics_credentials_unattended",
+                         lambda: "fake-creds")
+    rff.main()
+    storico = json.load(open(rff.FINESTRE))
+    assert "last_run_at" in storico
+
+
+def test_a_network_error_is_not_treated_as_a_consent_problem(repo, monkeypatch):
+    """Riprodotto dal dibattito di controllo: un errore di rete durante il refresh
+    (gia' successo in produzione allo script gemello, vedi youtubestats.err.log)
+    non deve scrivere consent_needed — non e' un problema di consenso, e non deve
+    propagare come crash non gestito."""
+    google_auth_exceptions = pytest.importorskip("google.auth.exceptions")
+    TransportError = google_auth_exceptions.TransportError
+    monkeypatch.setattr(rff.youtube_analytics_auth, "get_analytics_credentials_unattended",
+                         lambda: (_ for _ in ()).throw(TransportError("DNS irraggiungibile")))
+    rff.main()  # non deve sollevare
+    assert not os.path.exists(rff.CONSENT_STATUS)  # nessuna scrittura, non e' quel tipo di errore
 
 
 def test_get_analytics_credentials_unattended_never_reaches_an_interactive_browser():

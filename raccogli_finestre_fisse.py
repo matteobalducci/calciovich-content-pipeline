@@ -25,6 +25,9 @@ salta pulito. Il consenso successivo e' un passo umano (youtube_analytics_auth.p
 USO
   python3 raccogli_finestre_fisse.py            # raccoglie e aggiorna lo storico
   python3 raccogli_finestre_fisse.py --dry-run   # mostra il piano, non scrive nulla
+                                                  # (fa comunque le chiamate reali
+                                                  # all'API — solo la scrittura su
+                                                  # disco e' saltata)
 """
 import contextlib
 import fcntl
@@ -81,7 +84,12 @@ def build_plan(analytics_creds, today=None, windows_override=None):
     """Ritorna [(video_id, key, {campo: valore})] — solo i campi ancora dentro la
     propria finestra di aggiornamento (eta' < N+1). windows_override e' un dict
     {video_id: {data_iso: views}} iniettabile per i test di caratterizzazione,
-    inoltrato a fetch_fixed_windows() com'e'."""
+    inoltrato a fetch_fixed_windows() com'e'.
+
+    Isolamento per video: un `publishAt` malformato o un errore della API su un
+    singolo video (rete, quota, video cancellato) non deve affondare la raccolta
+    per tutti gli altri — quel video viene saltato con un avviso, il resto
+    continua."""
     if today is None:
         today = date.today()
 
@@ -92,14 +100,25 @@ def build_plan(analytics_creds, today=None, windows_override=None):
         publish_at = meta.get("publishAt") or meta.get("uploadedAt")
         if not vid or not publish_at:
             continue
-        publish_date = date.fromisoformat(publish_at[:10])
+
+        try:
+            publish_date = date.fromisoformat(publish_at[:10])
+        except ValueError:
+            print(f"⚠️  {key}: publishAt malformato ({publish_at!r}) — video saltato.")
+            continue
+
         age = (today - publish_date).days
         if age < 0 or age > SCOPE_DAYS:
             continue  # non ancora pubblicato, o uscito dallo scope di raccolta
 
         override = windows_override.get(vid) if windows_override is not None else None
-        windows = fetch_fixed_windows(vid, publish_date, analytics_creds=analytics_creds,
-                                       window_override=override, today=today)
+        try:
+            windows = fetch_fixed_windows(vid, publish_date, analytics_creds=analytics_creds,
+                                           window_override=override, today=today)
+        except Exception as e:
+            print(f"⚠️  {key} ({vid}): errore nel recupero finestre fisse "
+                  f"({type(e).__name__}) — video saltato, la raccolta continua.")
+            continue
 
         fields = {
             field: windows[field]
@@ -132,11 +151,17 @@ def main():
     dry_run = "--dry-run" in sys.argv
 
     try:
-        from google.auth.exceptions import RefreshError
+        from google.auth.exceptions import RefreshError, TransportError
         refresh_errors = (RefreshError,)
+        transport_errors = (TransportError,)
     except ImportError:
-        refresh_errors = ()  # google-auth non installato: nessuna RefreshError da intercettare
+        refresh_errors = ()  # google-auth non installato: nessuna eccezione da intercettare
+        transport_errors = ()
     consent_errors = (FileNotFoundError, ValueError) + refresh_errors
+    # transport_errors (rete verso Google, es. DNS irraggiungibile) e' un caso diverso
+    # da consent_errors: non serve un nuovo consenso, il prossimo trigger fra 6h
+    # riprova da solo. Gia' successo in produzione allo script gemello
+    # aggiorna_youtube_stats.py (vedi youtubestats.err.log) — non un rischio ipotetico.
 
     if dry_run:
         try:
@@ -145,6 +170,10 @@ def main():
             print(f"Consenso Analytics non disponibile ({type(e).__name__}) — "
                   f"--dry-run non può mostrare un piano reale finché non lo rifai "
                   f"(youtube_analytics_auth.py).")
+            return
+        except transport_errors as e:
+            print(f"Errore di rete verso Google ({type(e).__name__}) — --dry-run non "
+                  f"può mostrare un piano reale ora, riprova più tardi.")
             return
         updates = build_plan(analytics_creds=creds)
         print(f"{len(updates)} video con aggiornamenti da scrivere (nessuna scrittura, "
@@ -163,6 +192,11 @@ def main():
                   f"terminale con browser per rinnovarlo).")
             _write_consent_status(consent_needed=True, error_class=error_class)
             return
+        except transport_errors as e:
+            print(f"⚠️  errore di rete verso Google ({type(e).__name__}) durante il "
+                  f"refresh del token Analytics — non e' un problema di consenso, "
+                  f"salto questa raccolta e riprovo al prossimo trigger (6h).")
+            return
 
         _write_consent_status(consent_needed=False)
         updates = build_plan(analytics_creds=creds)
@@ -170,6 +204,7 @@ def main():
         storico = load(FINESTRE, {"records": {}})
         merged, changed = merge_windows(storico.get("records", {}), updates)
         storico["records"] = merged
+        storico["last_run_at"] = datetime.now().isoformat(timespec="seconds")
         upload_registry.save(FINESTRE, storico)
         print(f"Raccolta finestre fisse completata: {changed} valori aggiornati su "
               f"{len(updates)} video processati.")

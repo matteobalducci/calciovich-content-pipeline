@@ -82,3 +82,15 @@ def test_views_day1_by_video_ignores_videos_without_the_field():
         "v3": {"key": "k3"},
     }
     assert _views_day1_by_video(records) == {"v1": 10}
+
+
+def test_views_day1_by_video_tolerates_records_not_being_a_dict():
+    """Riprodotto dal dibattito di controllo: uno schema legacy o un file toccato
+    a mano (es. 'records' come lista invece di dict) non deve sollevare
+    AttributeError — degrada a nessun dato fisso, come promette il docstring."""
+    assert _views_day1_by_video([{"video_id": "v1", "views_day1": 10}]) == {}
+
+
+def test_views_day1_by_video_tolerates_a_record_that_is_not_a_dict():
+    records = {"v1": "non-un-dict", "v2": {"views_day1": 20}}
+    assert _views_day1_by_video(records) == {"v2": 20}

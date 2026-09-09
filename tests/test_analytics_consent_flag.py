@@ -1,5 +1,4 @@
-"""Guardia di consenso per raccogli_finestre_fisse.py (Fase 2 del layer analytics,
-vedi carica_youtube.py per il token condiviso di publishing).
+"""Guardia di consenso per raccogli_finestre_fisse.py (Fase 2 del layer analytics).
 
 WHY THIS EXISTS
 ----------------
@@ -23,7 +22,7 @@ def write_status(path, payload):
 
 
 def test_no_status_file_is_silent_not_an_error(tmp_path, monkeypatch):
-    """La Fase 2 non ha ancora girato una volta (o il Gate 0 non è passato): non è
+    """La Fase 2 non ha ancora girato una volta: non è
     un errore da segnalare, la guardia di freschezza generica già copre 'nessun
     dato mai' senza bisogno di duplicarlo qui."""
     monkeypatch.setattr(stato_pipeline, "ANALYTICS_CONSENT_STATUS_PATH",
@@ -69,6 +68,7 @@ def test_compute_status_surfaces_the_consent_flag_in_the_dashboard(tmp_path, mon
     write_status(p, {"consent_needed": True})
     monkeypatch.setattr(stato_pipeline, "ANALYTICS_CONSENT_STATUS_PATH", str(p))
     monkeypatch.setattr(stato_pipeline, "METRICHE_STORICO_PATH", str(tmp_path / "no-metriche.json"))
+    monkeypatch.setattr(stato_pipeline, "FINESTRE_FISSE_PATH", str(tmp_path / "no-finestre.json"))
     monkeypatch.setattr(stato_pipeline, "QUEUE_PATH", str(tmp_path / "no-queue.json"))
     monkeypatch.setattr(stato_pipeline, "IG_UPLOADS_PATH", str(tmp_path / "no-ig.json"))
     monkeypatch.setattr(stato_pipeline, "KNOWN_ISSUES_PATH", str(tmp_path / "no-issues.json"))

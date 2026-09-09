@@ -23,7 +23,7 @@ USO
   python3 check_outliers.py                # stampa il report e scrive outlier-flags.json
   python3 check_outliers.py --apply         # DEPRECATO: i FAIL non sospendono piu'
                                             # nulla da soli (vedi la nota nel codice).
-                                            # Restava per:
+                                            # Restava per: 
                                              # rotation-state.json / ai-content-queue.json
                                              # (stesso meccanismo gia' usato per vecio_dixe/tomasito)
 """
@@ -49,9 +49,16 @@ def _views_day1_by_video(finestre_records):
     API — vedi metriche_video.fetch_fixed_windows()). Il file puo' non esistere
     ancora (Fase 2 mai girata) o essere illeggibile: e' un dato opzionale che
     migliora il confronto quando c'e', non un requisito — degrada a nessun dato
-    fisso, mai a un crash di check_outliers.py."""
+    fisso, mai a un crash di check_outliers.py. Tollera anche una struttura
+    inattesa (non un dict, o un record che non e' un dict) invece di sollevare
+    AttributeError — un file toccato a mano o uno schema legacy non deve far
+    crashare il controllo LEGGERO di STEP 0."""
     out = {}
+    if not isinstance(finestre_records, dict):
+        return out
     for vid, rec in finestre_records.items():
+        if not isinstance(rec, dict):
+            continue
         d1 = rec.get("views_day1")
         if d1 is not None:
             out[vid] = d1
@@ -112,8 +119,15 @@ def main():
 
     try:
         finestre_records = json.load(open(FINESTRE_FISSE, encoding="utf-8")).get("records", {})
-    except Exception:
-        finestre_records = {}  # Fase 2 mai girata, o file illeggibile — degrada a lifetime
+    except FileNotFoundError:
+        finestre_records = {}  # Fase 2 mai girata — normale, non un errore
+    except Exception as e:
+        # File presente ma illeggibile/corrotto: degrada a lifetime (mai un crash
+        # qui), ma NON in silenzio — altrimenti il fix statistico della Fase 2
+        # smette di funzionare senza che nessuno se ne accorga.
+        print(f"⚠️  {FINESTRE_FISSE} illeggibile ({type(e).__name__}) — confronto solo "
+              f"lifetime per questo run.")
+        finestre_records = {}
     views_day1_by_video = _views_day1_by_video(finestre_records)
 
     flags = []
@@ -159,14 +173,14 @@ def main():
         # costa molto piu' di un vero positivo scoperto un giorno dopo.
         #
         # _choose_comparison() ora usa la finestra fissa a 24h (YouTube Analytics
-        # API) quando sia il video piu' recente sia un campione omogeneo di storia
-        # (>= MIN_HISTORY video) ce l'hanno — ma finche' quel campione non e'
-        # abbastanza numeroso il confronto resta lifetime-vs-lifetime, quindi il
-        # bias sopra puo' ancora presentarsi. --apply resta deprecato per lo
-        # stesso motivo di sempre: un FAIL non deve sospendere nulla da solo finche'
-        # non c'e' garanzia che il confronto sia quello corretto. I FAIL si
-        # segnalano e basta. I WIN non sono simmetrici, perche' un falso WIN non
-        # spegne niente.
+        # API, Fase 2) quando sia il video piu' recente sia un campione omogeneo
+        # di storia (>= MIN_HISTORY video) ce l'hanno — ma finche' quel campione
+        # non e' abbastanza numeroso il confronto resta lifetime-vs-lifetime,
+        # quindi il bias sopra puo' ancora presentarsi. --apply resta deprecato
+        # per lo stesso motivo di sempre: un FAIL non deve sospendere nulla da
+        # solo finche' non c'e' garanzia che il confronto sia quello corretto. I
+        # FAIL si segnalano e basta. I WIN non sono simmetrici, perche' un falso
+        # WIN non spegne niente.
         fails = [f for f in flags if f["tipo"] == "FAIL"]
         if fails:
             print("\n⚠️  FAIL rilevati, NON applicati automaticamente:")

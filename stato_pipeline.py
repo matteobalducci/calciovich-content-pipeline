@@ -15,11 +15,14 @@ IG_UPLOADS_PATH = os.path.join(HERE, "output", "instagram-uploads.json")
 KNOWN_ISSUES_PATH = os.path.join(HERE, "output", "known-issues.json")
 METRICHE_STORICO_PATH = os.path.join(HERE, "output", "metriche-video-storico.json")
 ANALYTICS_CONSENT_STATUS_PATH = os.path.join(HERE, "output", "analytics-consent-status.json")
+FINESTRE_FISSE_PATH = os.path.join(HERE, "output", "metriche-finestre-fisse.json")
 LAUNCHAGENTS = os.path.expanduser("~/Library/LaunchAgents")
 UPLOAD_PLIST_INSTALLED = os.path.join(LAUNCHAGENTS, "com.calciovich.upload.plist")
 
 METRICHE_WARN_HOURS = 36
 METRICHE_ERROR_HOURS = 72
+FINESTRE_WARN_HOURS = 36
+FINESTRE_ERROR_HOURS = 72
 
 PLATFORM_KEYS = {"youtube": "youtube", "instagram": "instagram_media_id", "tiktok": "tiktok_publish_id"}
 
@@ -143,18 +146,17 @@ def _metriche_freshness_flag():
 
 def _analytics_consent_flag():
     """Guardia di consenso per raccogli_finestre_fisse.py (Fase 2 del layer
-    analytics). Non un riuso di _metriche_freshness_flag(): risponde a una domanda
-    diversa — "serve un consenso umano", non "il dato è vecchio". Il token Analytics
-    è dedicato e isolato da carica_youtube.py: se scade o non è mai stato concesso,
-    nessun altro script della pipeline lo rinnova da solo (a differenza del token
-    condiviso di Fase 1, che si autoripara al prossimo consenso presidiato di
-    carica_youtube.py).
+    analytics). Non un riuso di _metriche_freshness_flag(): risponde a una domanda diversa — "serve un
+    consenso umano", non "il dato è vecchio". Il token Analytics è dedicato e
+    isolato da carica_youtube.py: se scade o non è mai stato concesso, nessun altro
+    script della pipeline lo rinnova da solo (a differenza del token condiviso di
+    Fase 1, che si autoripara al prossimo consenso presidiato di carica_youtube.py).
 
     Tre stati, deliberatamente non simmetrici: file assente → nessun flag (la Fase 2
-    non ha ancora girato una volta — non è un errore da segnalare, la guardia di
-    freschezza generica già copre "nessun dato mai" senza bisogno di duplicarlo
-    qui); consent_needed False → nessun flag; consent_needed True → il flag error
-    sotto."""
+    non ha ancora girato una volta — non è un errore da
+    segnalare, la guardia di freschezza generica già copre "nessun dato mai" senza
+    bisogno di duplicarlo qui); consent_needed False → nessun flag; consent_needed
+    True → il flag error sotto."""
     try:
         status = json.load(open(ANALYTICS_CONSENT_STATUS_PATH, encoding="utf-8"))
     except Exception:
@@ -165,6 +167,44 @@ def _analytics_consent_flag():
     return {"level": "error",
             "text": "Serve un nuovo consenso YouTube Analytics — rilancia "
                     "youtube_analytics_auth.py da un terminale con browser."}
+
+
+def _finestre_fisse_freshness_flag():
+    """Guardia di freschezza per raccogli_finestre_fisse.py (Fase 2) — stesso
+    principio di _metriche_freshness_flag(), file diverso. Senza questa, un guasto
+    silenzioso (metriche-finestre-fisse.json corrotto, o errori di rete ripetuti
+    durante il refresh del token che fanno saltare la raccolta senza toccare il
+    consenso) non produce alcun segnale: il fix statistico che e' l'intero scopo
+    della Fase 2 smetterebbe di funzionare senza che nessuno se ne accorga,
+    tornando silenziosamente al confronto lifetime-vs-lifetime che doveva
+    correggere. raccogli_finestre_fisse.py scrive "last_run_at" ad ogni esecuzione
+    riuscita, indipendentemente da quanti valori sono stati aggiornati."""
+    try:
+        last_run_at = json.load(open(FINESTRE_FISSE_PATH, encoding="utf-8")).get("last_run_at")
+    except Exception:
+        last_run_at = None
+
+    if last_run_at is None:
+        return {"level": "warn", "text": "Nessuna raccolta finestre fisse ancora "
+                "completata (raccogli_finestre_fisse.py non ha ancora prodotto uno "
+                "storico)."}
+
+    try:
+        last_dt = datetime.datetime.fromisoformat(last_run_at)
+    except ValueError:
+        return None
+
+    hours = (datetime.datetime.now() - last_dt).total_seconds() / 3600
+    if hours >= FINESTRE_ERROR_HOURS:
+        return {"level": "error",
+                "text": f"Nessuna raccolta finestre fisse riuscita da {hours:.0f} ore "
+                        f"(ultima: {last_run_at}) — controlla errori di rete o il "
+                        f"token YouTube Analytics."}
+    if hours >= FINESTRE_WARN_HOURS:
+        return {"level": "warn",
+                "text": f"Raccolta finestre fisse in ritardo: ultima riuscita "
+                        f"{hours:.0f} ore fa ({last_run_at})."}
+    return None
 
 
 def compute_status():
@@ -228,6 +268,10 @@ def compute_status():
     consent_flag = _analytics_consent_flag()
     if consent_flag:
         flags.append(consent_flag)
+
+    finestre_flag = _finestre_fisse_freshness_flag()
+    if finestre_flag:
+        flags.append(finestre_flag)
 
     return {
         "generatedAt": datetime.datetime.now().isoformat(timespec="seconds"),

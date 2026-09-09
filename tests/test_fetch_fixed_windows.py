@@ -45,8 +45,8 @@ def test_day2_is_cumulative_not_the_single_days_value():
     assert windows["views_day2"] == 340  # 339 + 1, non 1
 
 
-def test_day7_cumulative_matches_the_real_gate0_probe():
-    """Dati reali dal Gate 0 (09/09): short03-el-vecio-dixe.vert, iuQAVoyHo3Q."""
+def test_day7_cumulative_matches_a_real_probe():
+    """Dati reali osservati su un video noto: short03-el-vecio-dixe.vert, iuQAVoyHo3Q."""
     daily = {
         "2026-07-05": 339, "2026-07-06": 1, "2026-07-07": 2, "2026-07-08": 0,
         "2026-07-09": 3, "2026-07-10": 17, "2026-07-11": 7,
