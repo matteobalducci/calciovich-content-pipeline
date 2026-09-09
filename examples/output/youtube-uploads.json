@@ -1,0 +1,23 @@
+{
+  "short01-il-gol-impossibile.vert": {
+    "videoId": "demoYT001",
+    "url": "https://youtu.be/demoYT001",
+    "uploadedAt": "2026-07-01T11:00:00",
+    "publishAt": "2026-07-05T15:00:00Z",
+    "privacy": "public"
+  },
+  "short02-la-fascetta-rossa.vert": {
+    "videoId": "demoYT002",
+    "url": "https://youtu.be/demoYT002",
+    "uploadedAt": "2026-07-02T11:00:00",
+    "publishAt": "2026-07-06T15:00:00Z",
+    "privacy": "public"
+  },
+  "settimana1-day1-rovesciata-demo.tv": {
+    "videoId": "demoYT003",
+    "url": "https://youtu.be/demoYT003",
+    "uploadedAt": "2026-07-03T11:00:00",
+    "publishAt": "2026-07-07T15:00:00Z",
+    "privacy": "public"
+  }
+}

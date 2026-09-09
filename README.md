@@ -20,11 +20,12 @@ incident (a token resolving to the wrong channel). Playlists are curated manuall
 the app clears Google's verification. YouTube and Instagram publish without intervention.
 
 Alongside publishing, the system records what happens afterwards: a historical logger
-accumulates channel metrics with no retention cutoff, and an outlier detector scores
-each release against the median of previous releases in the same format. Today that measurement layer
-is deliberately thin — a daily trigger and a local dashboard. **Turning the accumulated
-time series into a proper analytics stack is the next phase of the project** (see
-[Roadmap](#roadmap)).
+accumulates channel metrics with no retention cutoff, an outlier detector scores each
+release against the median of previous releases in the same format, and a BigQuery
+loader turns that local state into a dimensional model — three fact tables, not one
+with a fictional "platform" column, because engagement metrics only exist for YouTube;
+the other two platforms are publish-event logs. **A reporting layer on top of that
+model (Looker) is the next phase of the project** (see [Roadmap](#roadmap)).
 
 ## Data flow
 
@@ -43,8 +44,9 @@ flowchart LR
   TS --> DASH["Dashboard<br/>app_server.py"]
   OUT --> P
   DASH --> P
-  TS -.planned.-> BQ["BigQuery<br/>+ Looker"]
-  style BQ stroke-dasharray: 4 4
+  TS --> BQ["BigQuery<br/>dimensional model"]
+  BQ -.planned.-> LK["Looker"]
+  style LK stroke-dasharray: 4 4
 ```
 
 Measurement feeds back into what gets produced next. The dashed branch is the roadmap,
@@ -93,6 +95,16 @@ not shipped.
   cleanly instead of trying to open a browser from an unattended process.
 - **`app_server.py`** — local HTTP server backing a dashboard over pipeline state and
   the accumulated metrics, regenerating its data on every start.
+- **`carica_bigquery.py` / `dimensional_model.py`** — loads the state above into
+  BigQuery as a small star schema: three fact tables, not one with a fictional
+  "platform" column, because engagement metrics only exist for YouTube — Instagram
+  and TikTok publishing is logged (confirmed/pending, raw platform-reported privacy)
+  but never measured. `dimensional_model.py` is the pure-Python half (row
+  construction, dedup, scope filtering) with zero dependency on the BigQuery SDK —
+  same reason `metriche_video.py` has none, this repo's CI runs without it. Staging
+  tables are replaced in full on every run rather than merged, because every local
+  source already holds complete current state, not an incremental log — `examples/`
+  has a runnable demo with no GCP credentials required.
 
 **Design note on the alerting cadence.** Outlier detection is a *lightweight daily
 trigger*, deliberately not a replacement for a periodic review. It answers "is this one
@@ -208,9 +220,12 @@ actually behaves over time. Four phases move that data onto a proper stack:
    for this are isolated from the ones that publish — the same "narrow, single-purpose
    OAuth scope" principle behind the caveat about playlist writes above, applied to a
    new surface before it becomes a second one.
-3. **Ingestion into BigQuery** — the channel time series and per-release metrics, from
-   all three platforms, loaded on a schedule instead of read from local files, with
-   dimensional modelling over content, format, platform and date.
+3. **Ingestion into BigQuery** *(done)* — `carica_bigquery.py`/`dimensional_model.py`,
+   above. Three fact tables instead of one, because only YouTube has engagement
+   metrics; the publish-event fact is filtered to content that exists in the video
+   calendar, with the exclusion count logged rather than silently dropped, and
+   "confirmed" is kept distinct from "publicly visible" (TikTok publishing runs
+   through a sandboxed, unaudited app — a confirmed post there is not a public one).
 4. **Looker** — reporting on top of the model, replacing the local dashboard.
 
 The interesting questions only become answerable once the warehouse lands: how retention

@@ -1,0 +1,22 @@
+{
+  "records": [
+    {
+      "video_id": "demoYT001",
+      "key": "short01-il-gol-impossibile.vert",
+      "categoria": "canonical",
+      "snapshot_at": "2026-07-06T09:00:00",
+      "views": 120,
+      "likes": 8,
+      "comments": 2
+    },
+    {
+      "video_id": "demoYT001",
+      "key": "short01-il-gol-impossibile.vert",
+      "categoria": "canonical",
+      "snapshot_at": "2026-07-06T15:00:00",
+      "views": 340,
+      "likes": 15,
+      "comments": 4
+    }
+  ]
+}

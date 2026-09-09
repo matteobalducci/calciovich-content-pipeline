@@ -33,42 +33,48 @@ def load(path, default):
         raise
 
 
-def load_confirmed_youtube_uploads(path):
+def load_confirmed_uploads(path, id_field):
     """BUGFIX (dibattito di controllo Fase 3, 09/09): dal commit 827ba65 (02/09) lo
-    stato di pubblicazione vive in SQLite (upload_registry.Registry) — youtube-uploads.json
-    resta solo come backup importato una tantum, mai piu' risincronizzato. Leggerlo
-    direttamente con load() (come facevano ancora raccogli_metriche_video.py,
-    raccogli_finestre_fisse.py e check_outliers.py, scritti l'8-9/09 ma contro la
-    fonte gia' superata) significa perdere in silenzio ogni video confermato dopo
-    quella data — coincideva per caso solo perche' nessun upload era stato confermato
-    nel frattempo. stato_pipeline.py legge gia' correttamente da Registry: qui si
-    allinea lo stesso pattern.
+    stato di pubblicazione vive in SQLite (upload_registry.Registry) — i JSON legacy
+    (youtube/instagram/tiktok-uploads.json) restano solo backup importati una tantum,
+    mai piu' risincronizzati. Leggerli direttamente con load() (come facevano ancora
+    raccogli_metriche_video.py, raccogli_finestre_fisse.py e check_outliers.py per
+    YouTube, scritti l'8-9/09 ma contro la fonte gia' superata) significa perdere in
+    silenzio ogni upload confermato dopo quella data. stato_pipeline.py legge gia'
+    correttamente da Registry per Instagram: questa funzione generalizza lo stesso
+    pattern a qualunque piattaforma (id_field e' il nome campo specifico della
+    piattaforma nel meta: "videoId"/"mediaId"/"publishId").
 
     Solo CONFIRMED: un record pending e' un tentativo di upload non ancora risolto
-    (vedi upload_registry.py), non un video da trattare come pubblicato — niente
-    fetch di statistiche per qualcosa che potrebbe non essere mai andato live.
+    (vedi upload_registry.py), non un item da trattare come pubblicato.
 
     SECONDO BUGFIX (dibattito di controllo sul primo, stesso giorno): Registry.reconcile()
     conferma un record recuperato dopo un crash/timeout con
     self.confirm(key, external_id, recoveredAt=...) — external_id finisce nella colonna
-    riservata, MAI in meta come "videoId" (quel nome campo e' YouTube-specifico,
-    Registry e' volutamente agnostico rispetto alla piattaforma). reconcile_pending()
-    gira ad OGNI esecuzione di carica_youtube.py, non e' un caso raro: un video
-    recuperato cosi' resterebbe CONFIRMED ma invisibile a chi legge meta["videoId"] —
-    la stessa sparizione silenziosa che il primo bugfix doveva chiudere, solo spostata
-    qui. "videoId" e "external_id" sono la stessa cosa per YouTube (vedi
-    carica_youtube.py: confirm(key, external_id=vid, videoId=vid, ...) nel percorso
-    felice) — quando manca il primo, il secondo e' sempre presente per un record
-    davvero CONFIRMED (confirm() lo richiede come parametro posizionale)."""
+    riservata, MAI in meta col nome campo piattaforma-specifico (Registry e'
+    volutamente agnostico rispetto alla piattaforma). reconcile_pending() gira ad OGNI
+    esecuzione dei publisher, non e' un caso raro — verificato per YouTube e Instagram
+    (entrambi perdono il campo id piattaforma-specifico dopo un recovery; TikTok no,
+    "publishId" e' scritto prima di qualunque crash possibile). external_id e id_field
+    sono la stessa cosa nel percorso felice (vedi carica_youtube.py:
+    confirm(key, external_id=vid, videoId=vid, ...)) — quando manca il primo, il
+    secondo e' sempre presente per un record davvero CONFIRMED (confirm() lo richiede
+    come parametro posizionale)."""
     registry = upload_registry.Registry(path)
     out = {}
     for key, record in registry.data.items():
         if upload_registry.state_of(record) != upload_registry.CONFIRMED:
             continue
-        if not record.get("videoId") and record.get("external_id"):
-            record = {**record, "videoId": record["external_id"]}
+        if not record.get(id_field) and record.get("external_id"):
+            record = {**record, id_field: record["external_id"]}
         out[key] = record
     return out
+
+
+def load_confirmed_youtube_uploads(path):
+    """Caso specifico YouTube di load_confirmed_uploads() — mantenuta come funzione
+    a se' perche' e' l'unica chiamata da codice gia' in produzione (Fase 1/2)."""
+    return load_confirmed_uploads(path, "videoId")
 
 
 def _app_data_categoria_map(app_data=None):

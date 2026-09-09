@@ -1,0 +1,11 @@
+{
+  "short01-il-gol-impossibile.vert": {
+    "mediaId": "demoIG001",
+    "publishedAt": "2026-07-05T19:00:00"
+  },
+  "diario-foto-esempio.jpg": {
+    "mediaId": "demoIGphoto001",
+    "publishedAt": "2026-07-10T09:00:00",
+    "type": "photo"
+  }
+}

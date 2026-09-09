@@ -1,0 +1,38 @@
+{
+  "weeks": [
+    {
+      "items": [
+        {
+          "file": "/output/short01-il-gol-impossibile.vert.mp4",
+          "stato": "Pronto",
+          "categoria": "Pronto",
+          "fonte": "output/ai-content-queue.json#short01-il-gol-impossibile"
+        },
+        {
+          "file": "/output/short02-la-fascetta-rossa.vert.mp4",
+          "stato": "Pronto",
+          "categoria": "Personaggio: Esordio",
+          "fonte": "output/ai-content-queue.json#short02-la-fascetta-rossa"
+        },
+        {
+          "file": "/output/ai-clips/settimana1-day1-rovesciata-demo.tv.mp4",
+          "stato": "Pronto",
+          "categoria": "Pronto",
+          "fonte": "output/ai-content-queue.json#settimana1-day1-rovesciata-demo"
+        },
+        {
+          "file": "/output/ai-clips/settimana1-day1-rovesciata-demo.tv.mp4",
+          "stato": "Pronto",
+          "categoria": "Pronto",
+          "fonte": "output/youtube-uploads.json#settimana1-day1-cronaca-backfill (nessun item corrispondente in ai-content-queue.json)"
+        },
+        {
+          "file": null,
+          "stato": "Da produrre",
+          "categoria": "",
+          "fonte": "output/ai-content-queue.json#short99-pianificato-gennaio"
+        }
+      ]
+    }
+  ]
+}

@@ -43,6 +43,22 @@ piano.json
 rotation-state.json
 
 # ---------------------------------------------------------------------------
+# Fase 3: chiave service account BigQuery — se mai generata in questo repo per
+# test, non va versionata (stesso principio dei token OAuth sopra).
+# ---------------------------------------------------------------------------
+bigquery_loader_key.json*
+
+# ---------------------------------------------------------------------------
+# examples/ e' committato di proposito (dati FITTIZI per la demo di
+# carica_bigquery.py, mai dati reali) — le regole sopra (output/, *-uploads.json)
+# sono pensate per i dati reali di produzione, non per questi. Negazione
+# esplicita, in quest'ordine (la directory prima dei file al suo interno,
+# altrimenti git non ci entra nemmeno per valutare i file).
+# ---------------------------------------------------------------------------
+!examples/output/
+!examples/output/*.json
+
+# ---------------------------------------------------------------------------
 # Generated media
 # ---------------------------------------------------------------------------
 *.mp4
