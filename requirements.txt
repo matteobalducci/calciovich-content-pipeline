@@ -10,6 +10,13 @@ google-api-python-client>=2.100
 google-genai>=0.3            # Gemini image generation (genera_immagini.py)
 google-auth>=2.23
 google-auth-oauthlib>=1.1
+# cryptography is a transitive dependency (google-auth-oauthlib -> requests-oauthlib
+# -> oauthlib[signedtoken]), not imported directly here — capped because newer
+# releases stopped shipping macOS x86_64/universal2 wheels, which breaks `pip
+# install` from source on an x86_64 interpreter (a real Intel Mac, or Rosetta —
+# e.g. a stock Anaconda install on Apple Silicon) unless a local OpenSSL toolchain
+# is set up for a from-source build. 44.x is the last release with those wheels.
+cryptography<45
 
 # --- Object storage (Cloudflare R2, S3-compatible) ---
 boto3>=1.34

@@ -21,8 +21,9 @@ Nessuna credenziale GCP necessaria: `--dry-run` costruisce le righe senza mai
 importare `google-cloud-bigquery` (vedi `dimensional_model.py`/
 `carica_bigquery.py::build_all()`).
 
+Da eseguire dalla root del repo:
+
 ```bash
-cd 07-transmedia/08-video-engine
 python3 -c "
 import carica_bigquery as cb
 cb.OUTPUT = 'examples/output'
