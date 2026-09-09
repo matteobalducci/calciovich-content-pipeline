@@ -137,9 +137,9 @@ def test_an_expired_token_degrades_cleanly_instead_of_crashing(repo, monkeypatch
     non puo' riaprire un browser (gira non presidiato via LaunchAgent). Deve saltare
     il run senza propagare un traceback grezzo nel log.
 
-    Richiede google-auth: la CI di questo repo pubblico gira apposta senza SDK/
-    credenziali (solo logica pura, vedi .github/workflows/tests.yml) — questo test
-    gira dove il pacchetto e' installato (il repo privato di produzione)."""
+    Richiede google-auth: la CI del repo pubblico gemello gira apposta senza SDK/
+    credenziali (solo logica pura) — questo test gira dove il pacchetto e' installato
+    (questo repo di produzione)."""
     google_auth_exceptions = pytest.importorskip("google.auth.exceptions")
     RefreshError = google_auth_exceptions.RefreshError
 

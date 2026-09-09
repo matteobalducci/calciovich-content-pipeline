@@ -1,4 +1,5 @@
-"""Guardia di freschezza per raccogli_metriche_video.py.
+"""Guardia di freschezza per raccogli_metriche_video.py (Fase 1 del layer
+analytics).
 
 WHY THIS EXISTS
 ----------------

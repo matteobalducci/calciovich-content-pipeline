@@ -22,6 +22,14 @@ service-account*.json
 *.key
 
 # ---------------------------------------------------------------------------
+# Internal planning/review docs — never published. This repo is public;
+# a single `git add .`/`git add -A` must not be able to leak an internal
+# adversarial-review log or planning document that references decisions
+# nobody outside the project has context for.
+# ---------------------------------------------------------------------------
+PLAN-*.md
+
+# ---------------------------------------------------------------------------
 # Runtime state and private editorial data (lives in the private repo)
 # ---------------------------------------------------------------------------
 output/

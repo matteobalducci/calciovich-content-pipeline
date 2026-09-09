@@ -1,4 +1,5 @@
-"""Guardia di consenso per raccogli_finestre_fisse.py (Fase 2 del layer analytics).
+"""Guardia di consenso per raccogli_finestre_fisse.py (Fase 2 del layer analytics,
+vedi carica_youtube.py per il token condiviso di publishing).
 
 WHY THIS EXISTS
 ----------------

@@ -34,11 +34,10 @@ STORICO = os.path.join(OUTPUT, "metriche-video-storico.json")
 
 @contextlib.contextmanager
 def collection_lock():
-    """Stesso pattern di carica_youtube.py::publish_lock(): senza lock, un'esecuzione che
-    dura piu' dell'intervallo fra due trigger (es. rete lenta sulle chiamate YouTube Data
-    API) puo' sovrapporsi alla successiva ed interlacciare le scritture su
-    metriche-video-storico.json — lo stesso pattern che ha gia' corrotto una serie storica
-    in aggiorna_youtube_stats.py (vedi il suo commento)."""
+    """Stesso pattern di carica_youtube.py::publish_lock(): senza lock, un'esecuzione che dura piu' dell'intervallo fra due trigger
+    (es. rete lenta sulle chiamate YouTube Data API) puo' sovrapporsi alla successiva ed
+    interlacciare le scritture su metriche-video-storico.json — lo stesso pattern che ha
+    gia' corrotto una serie storica in aggiorna_youtube_stats.py (vedi il suo commento)."""
     os.makedirs(OUTPUT, exist_ok=True)
     lock_path = os.path.join(OUTPUT, ".raccogli_metriche.lock")
     f = open(lock_path, "w")

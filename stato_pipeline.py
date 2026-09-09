@@ -103,7 +103,8 @@ def _ig_retry_jobs():
 
 
 def _metriche_freshness_flag():
-    """Guardia di freschezza per raccogli_metriche_video.py. Calcolo a grana-ORE: e' un tipo di
+    """Guardia di freschezza per raccogli_metriche_video.py (Fase 1 del layer
+    analytics). Calcolo a grana-ORE: e' un tipo di
     controllo nuovo, non un riuso del confronto a grana-data usato sopra per
     last_activity — a cadenza di 4 raccolte/giorno un controllo giornaliero
     nasconderebbe un buco di quasi 24h prima di segnalarlo.
@@ -146,7 +147,8 @@ def _metriche_freshness_flag():
 
 def _analytics_consent_flag():
     """Guardia di consenso per raccogli_finestre_fisse.py (Fase 2 del layer
-    analytics). Non un riuso di _metriche_freshness_flag(): risponde a una domanda diversa — "serve un
+    analytics). Non un
+    riuso di _metriche_freshness_flag(): risponde a una domanda diversa — "serve un
     consenso umano", non "il dato è vecchio". Il token Analytics è dedicato e
     isolato da carica_youtube.py: se scade o non è mai stato concesso, nessun altro
     script della pipeline lo rinnova da solo (a differenza del token condiviso di

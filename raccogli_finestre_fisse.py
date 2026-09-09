@@ -103,7 +103,11 @@ def build_plan(analytics_creds, today=None, windows_override=None):
 
         try:
             publish_date = date.fromisoformat(publish_at[:10])
-        except ValueError:
+        except (ValueError, TypeError):
+            # ValueError: stringa non in formato data (es. "N/D"). TypeError: non
+            # e' nemmeno una stringa (es. un intero, un registro corrotto/legacy)
+            # — publish_at[:10] non e' applicabile. Entrambi sono "malformato",
+            # isolati allo stesso modo.
             print(f"⚠️  {key}: publishAt malformato ({publish_at!r}) — video saltato.")
             continue
 

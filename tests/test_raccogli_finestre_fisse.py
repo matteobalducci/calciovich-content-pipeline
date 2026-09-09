@@ -114,6 +114,22 @@ def test_a_malformed_publish_date_is_skipped_not_a_crash_for_the_whole_batch(rep
     assert [u[0] for u in updates] == ["v-ok"]
 
 
+def test_a_publish_date_of_the_wrong_type_is_skipped_not_a_crash(repo):
+    """Riprodotto da un secondo audit indipendente sullo stesso fix: il primo
+    giro copriva solo una stringa mal formattata (ValueError). Un publishAt che
+    non e' nemmeno una stringa (es. un intero, un registro legacy/corrotto)
+    solleva TypeError su publish_at[:10] — stesso trattamento, non un crash."""
+    write_uploads(repo, {
+        "broken_type": {"videoId": "v-broken-type", "publishAt": 20260705},
+        "ok": {"videoId": "v-ok", "publishAt": "2026-07-05T15:00:00Z"},
+    })
+    updates = rff.build_plan(
+        analytics_creds=None, today=date(2026, 7, 6),
+        windows_override={"v-ok": {"2026-07-05": 10}},
+    )
+    assert [u[0] for u in updates] == ["v-ok"]
+
+
 def test_a_per_video_api_error_is_skipped_not_a_crash_for_the_whole_batch(repo, monkeypatch):
     """Riprodotto dal dibattito di controllo: un errore dell'API (rete, quota,
     video cancellato) su un video non deve affondare gli altri nello stesso run."""

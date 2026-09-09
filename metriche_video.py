@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 metriche_video.py — classificazione per-formato e recupero statistiche YouTube,
-condivisi fra check_outliers.py e raccogli_metriche_video.py.
+condivisi fra check_outliers.py e raccogli_metriche_video.py (Fase 1 del layer
+analytics).
 
 Estratto da check_outliers.py senza cambiarne il comportamento osservabile —
 check_outliers.py importa da qui invece di ridefinire la stessa logica.

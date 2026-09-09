@@ -8,8 +8,8 @@ Progetto GCP dedicato (calciovich-video-analytics), non calciovich-analytics: qu
 progetto e' scope stretto solo publishing, e yt-analytics.readonly e' gia' stato
 provato li' il 21/08 causando RefreshError + 403 (consent screen configurata solo
 per i 2 scope minimi). Isolare qui il file del token non basta se si condivide il
-progetto/consent screen: e' la consent screen del progetto a non avere lo scope,
-non il file del token.
+progetto/consent screen: e' la consent screen del progetto a non avere lo
+scope, non il file del token.
 
 Due funzioni, non una condivisa:
 - get_analytics_credentials_unattended() — usata da raccogli_finestre_fisse.py.
