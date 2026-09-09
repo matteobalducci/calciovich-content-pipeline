@@ -21,11 +21,12 @@ the app clears Google's verification. YouTube and Instagram publish without inte
 
 Alongside publishing, the system records what happens afterwards: a historical logger
 accumulates channel metrics with no retention cutoff, an outlier detector scores each
-release against the median of previous releases in the same format, and a BigQuery
-loader turns that local state into a dimensional model — three fact tables, not one
-with a fictional "platform" column, because engagement metrics only exist for YouTube;
-the other two platforms are publish-event logs. **A reporting layer on top of that
-model (Looker) is the next phase of the project** (see [Roadmap](#roadmap)).
+release against the median of previous releases in the same format, a BigQuery loader
+turns that local state into a dimensional model — three fact tables, not one with a
+fictional "platform" column, because engagement metrics only exist for YouTube; the
+other two platforms are publish-event logs — and a **Looker Studio report on top of
+that model** turns it into something a human can actually read (see
+[Roadmap](#roadmap)).
 
 ## Data flow
 
@@ -45,12 +46,10 @@ flowchart LR
   OUT --> P
   DASH --> P
   TS --> BQ["BigQuery<br/>dimensional model"]
-  BQ -.planned.-> LK["Looker"]
-  style LK stroke-dasharray: 4 4
+  BQ --> LK["Looker Studio<br/>report"]
 ```
 
-Measurement feeds back into what gets produced next. The dashed branch is the roadmap,
-not shipped.
+Measurement feeds back into what gets produced next.
 
 ## Measurement layer (today)
 
@@ -105,6 +104,30 @@ not shipped.
   tables are replaced in full on every run rather than merged, because every local
   source already holds complete current state, not an incremental log — `examples/`
   has a runnable demo with no GCP credentials required.
+- **Looker Studio report** — three pages on top of the BigQuery model, connected under
+  a dedicated Google identity with minimal IAM (dataset-level `READER` ACL +
+  project-level `bigquery.jobUser`) rather than the personal account or the loader's
+  service account — the same "narrow, single-purpose credential" principle as the
+  isolated OAuth tokens above, applied here as an IAM-scoped role within the same
+  project rather than a separate one, since a viewer only ever needs to read the
+  model, not run a project of its own.
+  [Open the report](https://lookerstudio.google.com/reporting/409222a0-a212-43c5-8b8c-8df5ff5040cd)
+  (view-only, no login required).
+  - **Performance YouTube** — a sortable table and a top-10 chart of lifetime views by
+    title, with the fixed post-publish windows (`views_day1`/`views_day2`/`views_day7`)
+    kept in a separate section rather than the same axis as cumulative views, so the
+    two never get silently averaged into one number.
+  - **Andamento nel tempo** — a per-content daily time series (views/likes/comments),
+    YouTube-only, declared in the title rather than implied.
+  - **Copertura multi-piattaforma** — aggregate reach counts (content confirmed on
+    YouTube / Instagram / TikTok / all three) next to a **privacy caveat in the same
+    card**, not a footnote: `CONFIRMED` on a platform is not the same claim as
+    "publicly visible" (as of writing, 74% of YouTube's confirmed events are
+    `private`, and TikTok's are 100% `SELF_ONLY`/`DRAFT_INBOX` — nothing there is
+    public today, though these numbers move as the calendar keeps publishing). The
+    detail table below it carries the real per-event privacy value. The two widgets
+    are deliberately never blended: a join on `content_key` between an aggregate and
+    a per-platform detail view fans out the counts.
 
 **Design note on the alerting cadence.** Outlier detection is a *lightweight daily
 trigger*, deliberately not a replacement for a periodic review. It answers "is this one
@@ -204,10 +227,11 @@ imageio-ffmpeg)
 
 ## Roadmap
 
-The pipeline's job today is production and publishing. The metrics it accumulates are
-still queried locally, from flat files, by a single-purpose dashboard — enough to answer
-"is this release off the scale?", not enough to answer anything about how an audience
-actually behaves over time. Four phases move that data onto a proper stack:
+The pipeline's job is production and publishing. What it accumulates started out
+queried locally, from flat files, by a single-purpose dashboard — enough to answer "is
+this release off the scale?", not enough to answer anything about how an audience
+actually behaves over time. Four phases moved that data onto a proper stack, all
+shipped:
 
 1. **Per-video collection & reliability** *(done)* — `raccogli_metriche_video.py`, above.
    The prerequisite for everything after it: a warehouse built on top of a collector with
@@ -226,11 +250,15 @@ actually behaves over time. Four phases move that data onto a proper stack:
    calendar, with the exclusion count logged rather than silently dropped, and
    "confirmed" is kept distinct from "publicly visible" (TikTok publishing runs
    through a sandboxed, unaudited app — a confirmed post there is not a public one).
-4. **Looker** — reporting on top of the model, replacing the local dashboard.
+4. **Looker Studio** *(done)* — reporting on top of the model, above. Not a
+   replacement for the local dashboard (`app_server.py`) — that answers "are the
+   collectors still running", the report answers "what happened".
 
-The interesting questions only become answerable once the warehouse lands: how retention
-differs by format across platforms, whether a release's early trajectory predicts its
-ceiling, and which content attributes correlate with sharing rather than with views.
+The interesting questions — how retention differs by format across platforms, whether a
+release's early trajectory predicts its ceiling, which content attributes correlate with
+sharing rather than with views — need more history in the warehouse than this project
+has accumulated yet to answer with confidence. The report above is where they'll get
+answered once it does.
 
 ## Repository scope
 
