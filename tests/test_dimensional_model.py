@@ -21,8 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import dimensional_model as dm  # noqa: E402
 
 
-def item(file=None, stato="Pronto", fonte="", categoria="Pronto"):
-    return {"file": file, "stato": stato, "fonte": fonte, "categoria": categoria}
+def item(file=None, stato="Pronto", fonte="", categoria="Pronto", titolo=None):
+    return {"file": file, "stato": stato, "fonte": fonte, "categoria": categoria, "titolo": titolo}
 
 
 def app_data(*items):
@@ -157,6 +157,42 @@ def test_categoria_reuses_metriche_video_categoria_not_reimplemented():
     ))
     rows, _ = dm.build_dim_content(data)
     assert rows[0]["categoria"] == "personaggio"
+
+
+# --- build_dim_content(): titolo (Fase 4, leggibilita' nel report Looker) --
+
+
+def test_titolo_is_carried_from_app_data():
+    data = app_data(item(file="/output/short01.mp4", stato="Pronto",
+                          titolo="Il pallone che tornava da solo"))
+    rows, _ = dm.build_dim_content(data)
+    assert rows[0]["titolo"] == "Il pallone che tornava da solo"
+
+
+def test_titolo_follows_the_dedup_winner_not_the_loser():
+    """Il titolo deve viaggiare insieme al resto dei campi del vincitore della
+    dedup, mai restare quello del candidato scartato — verificato in entrambi
+    gli ordini di inserimento."""
+    same_file = "/output/settimana2-day1-coast-to-coast-v2.tv.mp4"
+    vincitore = item(file=same_file, stato="Pronto",
+                      fonte="output/ai-content-queue.json#voce-vera",
+                      titolo="TITOLO VINCITORE")
+    perdente = item(file=same_file, stato="Pronto",
+                     fonte="output/youtube-uploads.json#backfill "
+                           "(nessun item corrispondente in ai-content-queue.json)",
+                     titolo="TITOLO SCARTATO")
+    for ordine in ([vincitore, perdente], [perdente, vincitore]):
+        rows, dupes = dm.build_dim_content(app_data(*ordine))
+        assert dupes == 1
+        assert rows[0]["titolo"] == "TITOLO VINCITORE"
+
+
+def test_titolo_falls_back_to_content_key_when_missing():
+    """Mai un campo vuoto in un report pubblico: se titolo manca, il selettore
+    deve comunque mostrare qualcosa di sensato invece di una cella vuota."""
+    data = app_data(item(file="/output/short01.mp4", stato="Pronto", titolo=None))
+    rows, _ = dm.build_dim_content(data)
+    assert rows[0]["titolo"] == "short01"
 
 
 # --- build_dim_platform() / build_dim_date() --------------------------------

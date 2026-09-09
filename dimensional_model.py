@@ -67,6 +67,14 @@ def build_dim_content(app_data):
     produzione oggi (verificato), ma non impossibile in futuro — non e' un
     controesempio ipotetico da ignorare solo perche' non si e' ancora manifestato.
 
+    `titolo` (aggiunto per Fase 4 — dashboard Looker Studio): app/data.json ha un
+    campo titolo umano leggibile per ogni item ("Il pallone che tornava da solo"),
+    distinto da content_key (derivato dal filename, es. "short01-il-pallone-
+    tornava-da-solo.vert"). Senza di lui un selettore/report esporrebbe solo
+    filename grezzi — inutilizzabile per chi guarda il dashboard senza contesto
+    tecnico. Fallback a content_key se titolo manca (non deve mai lasciare un
+    campo vuoto in un report pubblico).
+
     Ritorna (righe, conteggio_duplicati_risolti)."""
     app_map = _app_data_categoria_map(app_data)
 
@@ -78,20 +86,20 @@ def build_dim_content(app_data):
             f = it.get("file")
             if not f:
                 continue
-            candidates.append((_content_key(f), f, it.get("fonte") or ""))
+            candidates.append((_content_key(f), f, it.get("fonte") or "", it.get("titolo")))
 
     by_key = {}
     dropped_dupes = 0
-    for key, f, fonte in candidates:
+    for key, f, fonte, titolo in candidates:
         if key not in by_key:
-            by_key[key] = (f, fonte)
+            by_key[key] = (f, fonte, titolo)
             continue
         dropped_dupes += 1
-        existing_f, existing_fonte = by_key[key]
+        existing_f, existing_fonte, existing_titolo = by_key[key]
         existing_wins = existing_fonte.split("#", 1)[0] == "output/ai-content-queue.json"
         new_wins = fonte.split("#", 1)[0] == "output/ai-content-queue.json"
         if new_wins and not existing_wins:
-            by_key[key] = (f, fonte)
+            by_key[key] = (f, fonte, titolo)
         elif not existing_wins and not new_wins:
             print(f"⚠️  dim_content: duplicato su content_key {key!r} "
                   f"(file: {existing_f!r} vs {f!r}) senza una fonte "
@@ -109,12 +117,13 @@ def build_dim_content(app_data):
                   f"— tenuto il primo visto.")
 
     rows = []
-    for key, (f, fonte) in by_key.items():
+    for key, (f, fonte, titolo) in by_key.items():
         rows.append({
             "content_key": key,
             "file": f,
             "fonte": fonte,
             "categoria": _categoria(key, app_map),
+            "titolo": titolo or key,
         })
     return rows, dropped_dupes
 

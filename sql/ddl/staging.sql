@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS `calciovich-video-analytics.calciovich_content.dim_co
   content_key STRING NOT NULL,
   file        STRING,
   fonte       STRING,
-  categoria   STRING  -- canonical / gol-ai / long-form / personaggio / altro
+  categoria   STRING,  -- canonical / gol-ai / long-form / personaggio / altro
+  titolo      STRING   -- titolo umano leggibile (app/data.json), non il filename —
+                        -- per Fase 4 (selettori/etichette nel report Looker Studio)
 );
 
 -- Statica, 3 righe.

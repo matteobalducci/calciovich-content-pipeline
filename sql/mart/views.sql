@@ -14,14 +14,17 @@
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_daily_engagement` AS
 SELECT
-  video_id,
-  content_key,
-  DATE(snapshot_at) AS day,
-  MAX(views) AS views,
-  MAX(likes) AS likes,
-  MAX(comments) AS comments
-FROM `calciovich-video-analytics.calciovich_content.fct_youtube_engagement_snapshot`
-GROUP BY video_id, content_key, day;
+  e.video_id,
+  e.content_key,
+  d.titolo,
+  DATE(e.snapshot_at) AS day,
+  MAX(e.views) AS views,
+  MAX(e.likes) AS likes,
+  MAX(e.comments) AS comments
+FROM `calciovich-video-analytics.calciovich_content.fct_youtube_engagement_snapshot` e
+LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_content` d
+  ON d.content_key = e.content_key
+GROUP BY e.video_id, e.content_key, d.titolo, day;
 
 -- --------------------------------------------------------------------------
 -- mart_video_performance — una riga per content_key con l'ultimo snapshot noto,
@@ -38,6 +41,7 @@ WITH ultimo_snapshot AS (
 )
 SELECT
   d.content_key,
+  d.titolo,
   d.categoria,
   s.video_id,
   s.views          AS youtube_views_ultimo_snapshot,
@@ -71,3 +75,25 @@ FROM `calciovich-video-analytics.calciovich_content.dim_content` d
 LEFT JOIN `calciovich-video-analytics.calciovich_content.fct_publish_event` p
   ON p.content_key = d.content_key
 GROUP BY d.content_key, d.categoria;
+
+-- --------------------------------------------------------------------------
+-- mart_publish_reach_detail — stesso contenuto di mart_publish_reach, ma a
+-- grain piatto (content_key, platform) invece che un ARRAY<STRUCT> per
+-- content_key. Aggiunta per Fase 4: il connettore nativo BigQuery di Looker
+-- Studio non tratta campi REPEATED/RECORD come dimensioni/metriche utilizzabili
+-- nel report builder standard — dettaglio_piattaforme in mart_publish_reach
+-- resta corretto per un consumer SQL diretto, ma non e' collegabile a un
+-- grafico Looker Studio cosi' com'e'. Questa vista e' la fonte per la pagina
+-- "copertura multi-piattaforma" del report.
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_publish_reach_detail` AS
+SELECT
+  d.content_key,
+  d.titolo,
+  d.categoria,
+  p.platform,
+  p.privacy,
+  p.confirmed_at
+FROM `calciovich-video-analytics.calciovich_content.dim_content` d
+JOIN `calciovich-video-analytics.calciovich_content.fct_publish_event` p
+  ON p.content_key = d.content_key;

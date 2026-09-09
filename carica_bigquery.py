@@ -127,6 +127,7 @@ def _schemas(bigquery):
             bigquery.SchemaField("file", "STRING"),
             bigquery.SchemaField("fonte", "STRING"),
             bigquery.SchemaField("categoria", "STRING"),
+            bigquery.SchemaField("titolo", "STRING"),
         ],
         "fct_youtube_engagement_snapshot": [
             bigquery.SchemaField("video_id", "STRING"),
