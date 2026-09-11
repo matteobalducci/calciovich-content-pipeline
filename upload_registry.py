@@ -58,6 +58,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -200,9 +201,35 @@ class Registry:
         self.conn.row_factory = sqlite3.Row
         # WAL: readers do not block the writer and vice versa. Without it a
         # dashboard reading the state can lock out the publisher writing it.
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=FULL")
-        self.conn.executescript(_SCHEMA)
+        #
+        # The `timeout=` above only covers ordinary lock waits inside a transaction.
+        # Verified empirically (several processes opening the same brand-new db_path
+        # at once, no file yet on disk): the one-time transition into WAL mode on a
+        # fresh file can still raise "database is locked" immediately, not a timeout
+        # — several connections race to write the WAL header the first time, and
+        # that race is not the kind of wait `sqlite3.connect(timeout=...)` retries.
+        # This is a startup race, not a corrupt file, so it gets its own short retry
+        # instead of either being left to crash the caller or folded into
+        # RegistryCorrupt (which means something different: a file that exists and
+        # cannot be trusted).
+        last_exc = None
+        for attempt in range(20):
+            try:
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                self.conn.execute("PRAGMA synchronous=FULL")
+                self.conn.executescript(_SCHEMA)
+                last_exc = None
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                last_exc = exc
+                time.sleep(0.05 * (attempt + 1))
+        if last_exc is not None:
+            raise RegistryCorrupt(
+                f"cannot initialise {self.db_path}: still locked after concurrent "
+                f"retries ({last_exc})"
+            ) from last_exc
 
     def _migrate_legacy_json(self) -> None:
         """Import the old JSON registry once, then leave it alone as a backup."""

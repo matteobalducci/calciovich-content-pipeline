@@ -6,6 +6,7 @@ step and then constructing a fresh Registry over the same file.
 """
 
 import json
+import multiprocessing as mp
 import os
 import sys
 
@@ -308,3 +309,65 @@ def test_legacy_json_is_imported_once_and_left_as_backup(path):
     reg.confirm("nuovo.mp4", "v2")
     again = Registry(path)
     assert set(again.data) == {"vecchio.mp4", "nuovo.mp4"}
+
+
+def _open_registry_at_barrier(barrier, path, q):
+    """Corpo del processo figlio per il test qui sotto: sta ferma su barrier,
+    cosi' TUTTI i figli chiamano Registry(path) nello stesso istante invece che
+    in sequenza sfalsata — la sola cosa che rende la race riproducibile."""
+    import upload_registry as ur
+    barrier.wait()
+    try:
+        reg = ur.Registry(path)
+        reg.begin("item.mp4", source_id=None)
+        reg.confirm("item.mp4", "vid-1")
+        q.put("OK")
+    except Exception as exc:  # riportato al processo di test, non sollevato qui
+        q.put(f"FAIL {type(exc).__name__}: {exc}")
+
+
+def test_concurrent_first_open_from_real_separate_processes_does_not_crash(tmp_path):
+    """Trovato con un vero stress test multi-processo (non in-process come i test
+    sopra, che aprono due Registry() in sequenza nello stesso interprete): quando
+    piu' PROCESSI SEPARATI aprono per la prima volta lo stesso db_path non ancora
+    esistente esattamente nello stesso istante, la transizione 'PRAGMA
+    journal_mode=WAL' su un file appena creato puo' sollevare 'database is
+    locked' anche con timeout= impostato su connect() — il busy handler che quel
+    timeout installa non copre in modo affidabile la sola transizione a WAL mode
+    quando piu' connessioni corrono a scrivere l'header WAL nello stesso istante.
+    Riprodotto empiricamente prima del retry aggiunto in Registry._connect()
+    (fino al 40% dei lanci con processi avviati da una shell in background).
+
+    Usa processi reali via multiprocessing (fork), sincronizzati con una
+    Barrier cosi' TUTTI chiamano Registry() nello stesso istante — non
+    subprocess/bash: verificato che qualunque overhead fra l'avvio di un
+    processo e il successivo (una Popen() in piu' in un ciclo Python, l'avvio di
+    bash -c da dentro pytest) disperde l'istante di partenza abbastanza da
+    mascherare quasi sempre la race. La Barrier e' la sola sincronizzazione
+    abbastanza stretta da riprodurla in modo affidabile *anche annidata dentro
+    pytest*. Rimane probabilistica (~1/3 dei lotti da 16 processi nella macchina
+    di sviluppo): il ciclo di lotti qui sotto la compensa."""
+    ctx = mp.get_context("fork")
+    n_procs, n_batches = 16, 8
+    seen_ok = 0
+    failures = []
+    for batch in range(n_batches):
+        run_dir = tmp_path / f"batch_{batch}"
+        run_dir.mkdir()
+        path = str(run_dir / "youtube-uploads.json")
+        barrier = ctx.Barrier(n_procs)
+        q = ctx.Queue()
+        procs = [ctx.Process(target=_open_registry_at_barrier, args=(barrier, path, q))
+                 for _ in range(n_procs)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=30)
+        results = [q.get(timeout=5) for _ in range(n_procs)]
+        seen_ok += sum(1 for r in results if r == "OK")
+        failures += [r for r in results if r != "OK"]
+
+    assert seen_ok == n_procs * n_batches, (
+        f"{len(failures)}/{n_procs * n_batches} processi sono morti durante "
+        f"l'apertura concorrente del registro: {failures[:3]}"
+    )
