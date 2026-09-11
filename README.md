@@ -146,10 +146,12 @@ or slow detection.
   hand-written prompts stay short instead of accumulating defensive boilerplate with
   every fix.
 - `genera_immagini.py` / `genera_immagini_free.py` / `genera_foto_ai.py` — character
-  illustrations and "archive" photos, on a paid provider (Seedream) or a free one
-  (Pollinations) depending on how much framing precision the shot needs.
-- `genera_voci.py` / `genera_voci_free.py` — neural voiceover (edge-tts, free) for
-  the long-form audiobook format.
+  illustrations on a paid provider (Gemini 2.5 Flash Image, "Nano Banana") or a
+  free one (Pollinations), and "archive" photos on a different paid provider
+  (Seedream via PiAPI, same account as the video generator) — the choice depends
+  on how much framing precision the shot needs, not on a single shared provider.
+- `genera_voci.py` / `genera_voci_free.py` — neural voiceover, ElevenLabs (paid)
+  or edge-tts (free, the default for the long-form audiobook format).
 - `crea_audiolibro.py` / `make_video.py` — assemble book chapters, illustrations,
   voiceover and music into edited videos (Ken Burns pans, synced subtitles, episode
   badges).
@@ -222,7 +224,8 @@ or slow detection.
 
 Python 3 · Google API Client (YouTube Data API v3, YouTube Analytics API) · Meta
 Graph API · TikTok Content Posting API · Cloudflare R2 (S3-compatible, via boto3) ·
-PiAPI (Seedance/Seedream) · Pollinations · edge-tts · Pillow · ffmpeg (via
+PiAPI (Seedance/Seedream) · Google Gemini API (`google-genai`, image generation) ·
+ElevenLabs (optional paid voice) · Pollinations · edge-tts · Pillow · ffmpeg (via
 imageio-ffmpeg)
 
 ## Roadmap
