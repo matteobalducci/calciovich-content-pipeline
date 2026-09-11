@@ -39,6 +39,7 @@ USO
 """
 import os, re, json, sys, argparse
 import googleapiclient.discovery
+import googleapiclient.errors
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
@@ -214,7 +215,6 @@ def find_playlist(yt, title):
 
 def existing_items(yt, playlist_id):
     """videoId -> playlistItem id, per sapere cosa manca senza duplicare."""
-    import googleapiclient.errors
     out = {}
     page = None
     while True:
