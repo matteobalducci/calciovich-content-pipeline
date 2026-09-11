@@ -37,10 +37,11 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 
-from upload_registry import DB_NAME, _Transaction
+from upload_registry import DB_NAME, RegistryCorrupt, _Transaction
 
 DEFAULT_MONTHLY_CAP_USD = 20.0
 DEFAULT_MAX_ATTEMPTS_PER_ITEM = 3
@@ -122,8 +123,31 @@ class Budget:
         self.max_attempts = max_attempts_per_item
         self.conn = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.executescript(_SCHEMA)
+        # Same startup race as upload_registry.Registry._connect() (this ledger
+        # lives in the same kind of SQLite file, same DB_NAME): several processes
+        # opening this db_path for the very first time at once — e.g. two
+        # concurrent genera_video_ai.py runs — can hit "database is locked" on the
+        # one-time WAL-mode transition even with timeout= set on connect(), because
+        # that timeout covers ordinary lock waits inside a transaction, not the
+        # race to write the WAL header on a brand-new file. Retry instead of
+        # leaving this unhandled.
+        last_exc = None
+        for attempt in range(20):
+            try:
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                self.conn.executescript(_SCHEMA)
+                last_exc = None
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                last_exc = exc
+                time.sleep(0.05 * (attempt + 1))
+        if last_exc is not None:
+            raise RegistryCorrupt(
+                f"cannot initialise {self.db_path}: still locked after concurrent "
+                f"retries ({last_exc})"
+            ) from last_exc
 
     # ---- queries -------------------------------------------------------
 

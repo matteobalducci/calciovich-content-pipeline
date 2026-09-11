@@ -5,6 +5,7 @@ not exist. These assert that both are now real, and — the part that actually
 protects the wallet — that they hold when two processes generate at once.
 """
 
+import multiprocessing as mp
 import os
 import sys
 
@@ -132,3 +133,53 @@ def test_summary_reports_the_real_numbers(out):
     b.reserve(4.5).settle()
     text = b.summary()
     assert "4.50" in text and "20.00" in text and "15.50" in text
+
+
+def _open_budget_at_barrier(barrier, out_dir, q):
+    """Corpo del processo figlio: stessa tecnica di
+    test_upload_registry.py::test_concurrent_first_open_from_real_separate_processes_does_not_crash
+    (Barrier, non subprocess/bash — l'unica sincronizzazione stretta abbastanza
+    da far chiamare Budget() a TUTTI i figli nello stesso istante)."""
+    from budget import Budget
+    barrier.wait()
+    try:
+        b = Budget(out_dir, provider="piapi")
+        b.reserve(0.1, item=f"item-{__import__('os').getpid()}").settle()
+        q.put("OK")
+    except Exception as exc:
+        q.put(f"FAIL {type(exc).__name__}: {exc}")
+
+
+def test_concurrent_first_open_from_real_separate_processes_does_not_crash(tmp_path):
+    """Budget condivide lo stesso pattern non protetto di
+    upload_registry.Registry._connect() PRIMA del fix in quel modulo: apre lo
+    stesso tipo di file SQLite (stesso DB_NAME), ma con la propria copia
+    duplicata (non condivisa) del codice di setup — quindi il fix su Registry
+    non copre Budget. L'unico chiamante reale, genera_video_ai.py, apre un
+    Budget ad ogni esecuzione: due generazioni a pagamento lanciate quasi
+    insieme (es. un retry manuale mentre l'altra e' ancora in corso) aprono lo
+    stesso db_path per la prima volta in un istante vicino abbastanza da
+    innescare la stessa race sulla transizione a WAL mode. Vedi il test
+    gemello in test_upload_registry.py per i dettagli/probabilita' misurate."""
+    ctx = mp.get_context("fork")
+    n_procs, n_batches = 16, 8
+    seen_ok = 0
+    failures = []
+    for batch in range(n_batches):
+        out_dir = str(tmp_path / f"batch_{batch}" / "output" / "ai-clips")
+        barrier = ctx.Barrier(n_procs)
+        q = ctx.Queue()
+        procs = [ctx.Process(target=_open_budget_at_barrier, args=(barrier, out_dir, q))
+                 for _ in range(n_procs)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=30)
+        results = [q.get(timeout=5) for _ in range(n_procs)]
+        seen_ok += sum(1 for r in results if r == "OK")
+        failures += [r for r in results if r != "OK"]
+
+    assert seen_ok == n_procs * n_batches, (
+        f"{len(failures)}/{n_procs * n_batches} processi sono morti durante "
+        f"l'apertura concorrente del ledger: {failures[:3]}"
+    )
