@@ -104,7 +104,7 @@ Measurement feeds back into what gets produced next.
   tables are replaced in full on every run rather than merged, because every local
   source already holds complete current state, not an incremental log — `examples/`
   has a runnable demo with no GCP credentials required.
-- **Looker Studio report** — three pages on top of the BigQuery model, connected under
+- **Looker Studio report** — five pages on top of the BigQuery model, connected under
   a dedicated Google identity with minimal IAM (dataset-level `READER` ACL +
   project-level `bigquery.jobUser`) rather than the personal account or the loader's
   service account — the same "narrow, single-purpose credential" principle as the
@@ -128,6 +128,16 @@ Measurement feeds back into what gets produced next.
     detail table below it carries the real per-event privacy value. The two widgets
     are deliberately never blended: a join on `content_key` between an aggregate and
     a per-platform detail view fans out the counts.
+  - **Categoria a confronto** — total and per-video-average views by content category
+    (`gol-ai`, `canonical`, `personaggio`, `long-form`), kept as two separate charts
+    rather than one, since a category can win on volume without winning on attention
+    per piece, or the other way round. Explicitly caveated on the page itself as
+    indicative, not conclusive, given how few videos exist per category so far.
+  - **Copertura per combinazione** — content broken down by the *exact* set of
+    platforms it went out on (YouTube-only, YouTube+Instagram, all three, ...),
+    rather than the marginal per-platform totals on the multi-platform page — the
+    two answer different questions and are deliberately not derivable from each other
+    at a glance.
 
 **Design note on the alerting cadence.** Outlier detection is a *lightweight daily
 trigger*, deliberately not a replacement for a periodic review. It answers "is this one
