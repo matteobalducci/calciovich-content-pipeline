@@ -28,6 +28,28 @@ other two platforms are publish-event logs — and a **Looker Studio report on t
 that model** turns it into something a human can actually read (see
 [Roadmap](#roadmap)).
 
+## Looker Studio report
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/01_performance_youtube.png" alt="Performance YouTube page"/></td>
+<td width="50%"><img src="docs/screenshots/02_andamento_views.png" alt="Andamento views YouTube nel tempo page"/></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/03_copertura_multi_piattaforma.png" alt="Copertura multi-piattaforma page"/></td>
+<td width="50%"><img src="docs/screenshots/04_categoria_a_confronto.png" alt="Categoria a confronto page"/></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/05_copertura_per_combinazione.png" alt="Copertura per combinazione page"/></td>
+<td width="50%"></td>
+</tr>
+</table>
+
+Real captures of the live, published report (not a recreation) — the figures they show
+are the same ones read live off
+[the report itself](https://lookerstudio.google.com/reporting/409222a0-a212-43c5-8b8c-8df5ff5040cd),
+which (unlike the screenshots above) always reflects the current BigQuery model.
+
 ## Data flow
 
 ```mermaid
