@@ -115,7 +115,14 @@ Measurement feeds back into what gets produced next.
   never-granted consent writes a status flag for the dashboard and skips the run
   cleanly instead of trying to open a browser from an unattended process.
 - **`app_server.py`** — local HTTP server backing a dashboard over pipeline state and
-  the accumulated metrics, regenerating its data on every start.
+  the accumulated metrics, regenerating its data on every start. Also runs a background
+  watchdog thread on that same always-on process — checks the freshness guard above
+  every 30 min and fires a macOS notification on any warn/error flag (re-notified at
+  most every 12h per issue, not every cycle). Added after a real gap: the
+  `youtubestats` `LaunchAgent` missed several days of collection during extended
+  battery maintenance-sleep, and the freshness check — correct, but only queryable on
+  demand — sat silently until the public Looker Studio chart looked broken days later.
+  The check existed; nobody was looking at it.
 - **`carica_bigquery.py` / `dimensional_model.py`** — loads the state above into
   BigQuery as a small star schema: three fact tables, not one with a fictional
   "platform" column, because engagement metrics only exist for YouTube — Instagram
@@ -140,7 +147,11 @@ Measurement feeds back into what gets produced next.
     kept in a separate section rather than the same axis as cumulative views, so the
     two never get silently averaged into one number.
   - **Andamento nel tempo** — a per-content daily time series (views/likes/comments),
-    YouTube-only, declared in the title rather than implied.
+    YouTube-only, declared in the title rather than implied. Missing days render as a
+    genuine line break (`Interruzioni di riga`), not the chart default of plotting
+    zero — the LaunchAgent gap above showed up here first, as views appearing to crash
+    to zero and spike back days later, which cannot happen to a metric that only ever
+    grows. A gap now reads as "no data collected", not as a fabricated zero.
   - **Copertura multi-piattaforma** — aggregate reach counts (content confirmed on
     YouTube / Instagram / TikTok / all three) next to a **privacy caveat in the same
     card**, not a footnote: `CONFIRMED` on a platform is not the same claim as
