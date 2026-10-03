@@ -22,6 +22,19 @@ merge_records()/merge_windows() (accumulano localmente, riscrivono l'intero file
 Registry.data (sempre SELECT * sullo stato corrente). Un'istintiva scelta
 WRITE_APPEND per una "tabella di staging" romperebbe questa proprieta'.
 
+ECCEZIONE (2026-10-01): fct_youtube_engagement_snapshot e' WRITE_APPEND delle sole
+righe piu' recenti di MAX(snapshot_at) gia' su BigQuery, non WRITE_TRUNCATE come le
+altre. Da quando la raccolta gira anche da GitHub Actions (backstop per i buchi del
+LaunchAgent locale durante sleep prolungati — vedi examples/youtube-stats-cloud.yml), questa e'
+l'unica tabella scritta da due processi indipendenti con stati locali diversi: il
+Mac continua a vedere solo il proprio storico locale (output/metriche-video-storico.json,
+mai sincronizzato con la cloud per scelta — vedi .gitignore), GitHub Actions scrive
+una sola riga fresca a ogni run senza vedere lo storico del Mac. Un WRITE_TRUNCATE
+da uno dei due cancellerebbe quello che l'altro ha scritto nel frattempo. Le altre
+cinque tabelle restano WRITE_TRUNCATE: solo il Mac le scrive (GitHub Actions non ha
+app/data.json, le upload-registry, ne' le finestre fisse — vedi il workflow), quindi
+non c'e' nessun secondo scrittore con cui andare in conflitto.
+
 _run_metadata e' la SOLA eccezione: WRITE_APPEND deliberato, una riga per run
 RIUSCITO, scritta in un unico INSERT alla fine (mai una riga anticipata con
 completed_at NULL — un run che crasha a meta' non scrive nessuna riga, punto). I
@@ -164,6 +177,29 @@ def _bigquery_client(bigquery, service_account):
     return bigquery.Client(project=PROJECT, credentials=creds)
 
 
+def _max_engagement_snapshot_at(client, bigquery):
+    """MAX(snapshot_at) gia' presente su BigQuery per fct_youtube_engagement_snapshot,
+    formattata per combaciare ESATTAMENTE con le stringhe locali ("%Y-%m-%dT%H:%M:%S",
+    senza offset) per un confronto per stringa diretto in dm.filter_new_engagement_rows.
+    Deliberatamente FORMAT_TIMESTAMP, non CAST(...AS STRING): CAST produce
+    "2026-09-29 18:08:53+00" (spazio, offset esplicito) che confrontato come stringa
+    con "2026-09-29T18:08:53" non ordina in modo sensato (scoperto prima di
+    qualunque run reale, con un confronto diretto delle due stringhe). None se la
+    tabella non esiste ancora o e' vuota: in quel caso filter_new_engagement_rows
+    non filtra nulla, comportamento corretto per il primissimo run."""
+    table_id = f"{PROJECT}.{DATASET}.fct_youtube_engagement_snapshot"
+    try:
+        rows = list(client.query(
+            f"SELECT FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%S', MAX(snapshot_at)) AS m "
+            f"FROM `{table_id}`"
+        ).result())
+    except Exception:
+        return None
+    if not rows or rows[0]["m"] is None:
+        return None
+    return rows[0]["m"]
+
+
 def _write_table(client, bigquery, table_name, rows, schema, write_disposition):
     """Crea la tabella se non esiste (schema esplicito, non inferito — un load con
     zero righe non deve lasciare la tabella senza schema) e carica le righe con la
@@ -210,15 +246,24 @@ def main():
     client = _bigquery_client(bigquery, service_account)
     schemas = _schemas(bigquery)
 
-    staging_tables = ["dim_platform", "dim_date", "dim_content",
-                       "fct_youtube_engagement_snapshot", "fct_youtube_fixed_window",
-                       "fct_publish_event"]
+    truncate_tables = ["dim_platform", "dim_date", "dim_content",
+                        "fct_youtube_fixed_window", "fct_publish_event"]
     written = []
-    for name in staging_tables:
+    for name in truncate_tables:
         _write_table(client, bigquery, name, tables[name], schemas[name],
                      write_disposition="WRITE_TRUNCATE")
         written.append(name)
         print(f"✓ {name} scritta ({len(tables[name])} righe)")
+
+    max_remote = _max_engagement_snapshot_at(client, bigquery)
+    new_engagement_rows = dm.filter_new_engagement_rows(
+        tables["fct_youtube_engagement_snapshot"], max_remote)
+    _write_table(client, bigquery, "fct_youtube_engagement_snapshot", new_engagement_rows,
+                 schemas["fct_youtube_engagement_snapshot"], write_disposition="WRITE_APPEND")
+    written.append("fct_youtube_engagement_snapshot")
+    print(f"✓ fct_youtube_engagement_snapshot scritta ({len(new_engagement_rows)} righe "
+          f"nuove su {len(tables['fct_youtube_engagement_snapshot'])} nello storico locale"
+          f"{', max remoto ' + max_remote if max_remote else ', prima scrittura'})")
 
     run_row = {
         "run_id": uuid.uuid4().hex,

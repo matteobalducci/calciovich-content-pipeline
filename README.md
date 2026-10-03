@@ -122,7 +122,11 @@ Measurement feeds back into what gets produced next.
   `youtubestats` `LaunchAgent` missed several days of collection during extended
   battery maintenance-sleep, and the freshness check — correct, but only queryable on
   demand — sat silently until the public Looker Studio chart looked broken days later.
-  The check existed; nobody was looking at it.
+  The check existed; nobody was looking at it. The "nothing published today" signal is
+  read from the live publish registry (SQLite), not from the content queue, and compares
+  against the real cadence: warn past 30 h without a public upload, error past 54 h, with a
+  grace window while a scheduled upload is still due — so a missed publishing day is caught
+  by the same mechanism that catches a missed collection day.
 - **`carica_bigquery.py` / `dimensional_model.py`** — loads the state above into
   BigQuery as a small star schema: three fact tables, not one with a fictional
   "platform" column, because engagement metrics only exist for YouTube — Instagram
@@ -131,8 +135,25 @@ Measurement feeds back into what gets produced next.
   construction, dedup, scope filtering) with zero dependency on the BigQuery SDK —
   same reason `metriche_video.py` has none, this repo's CI runs without it. Staging
   tables are replaced in full on every run rather than merged, because every local
-  source already holds complete current state, not an incremental log — `examples/`
-  has a runnable demo with no GCP credentials required.
+  source already holds complete current state, not an incremental log — with one
+  deliberate exception: the engagement snapshot table is append-only, writing just the
+  rows newer than `MAX(snapshot_at)` already in BigQuery, because since the cloud
+  collector below it has two independent writers, and a truncate from one would erase
+  what the other wrote in the meantime. BigQuery's free tier has no DML, so this is a
+  filtered load, not an `UPDATE`/`MERGE`. `examples/` has a runnable demo with no GCP
+  credentials required.
+- **`raccogli_snapshot_cloud.py`** — a cloud backstop for the collection gap above: one
+  fresh snapshot of views/likes/comments every 6 hours from GitHub Actions (workflow in
+  `examples/youtube-stats-cloud.yml`; it is not enabled in this repo because it needs
+  credentials that live only in the production repo's secrets). Two details worth
+  knowing: it authenticates with a **read-only** token (`youtube.readonly`, its own OAuth
+  client, `youtube_readonly_auth.py`) rather than the upload-scoped one — a leaked
+  secret can read statistics, not touch the channel — and it has to write timestamps in
+  the Mac's convention (Rome local time, naive), not the runner's UTC. The first version
+  didn't: a green CI run had written zero rows, because the incremental filter compared
+  strings across two timezone conventions and silently discarded everything. The script
+  now exits non-zero when it collected videos but wrote no rows, so a green run means
+  rows landed.
 - **Looker Studio report** — five pages on top of the BigQuery model, connected under
   a dedicated Google identity with minimal IAM (dataset-level `READER` ACL +
   project-level `bigquery.jobUser`) rather than the personal account or the loader's

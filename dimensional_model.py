@@ -173,6 +173,27 @@ def build_fct_youtube_engagement_snapshot(storico_records):
     } for r in storico_records]
 
 
+def filter_new_engagement_rows(engagement_rows, after_snapshot_at):
+    """Righe con snapshot_at strettamente piu' recente di after_snapshot_at (stringa
+    ISO locale, stesso formato ovunque in questo progetto — confronto per stringa,
+    niente parsing datetime/timezone). after_snapshot_at None = nessun filtro,
+    prendi tutto (tabella remota non ancora creata o vuota).
+
+    Esiste perche' fct_youtube_engagement_snapshot e' passata da WRITE_TRUNCATE a
+    WRITE_APPEND (vedi carica_bigquery.py): da quando la raccolta gira anche da
+    GitHub Actions come backstop per i buchi del LaunchAgent locale, ci sono due
+    scrittori indipendenti con storici locali diversi — il Mac non deve poter
+    cancellare con un truncate cio' che GitHub Actions ha scritto nel frattempo, e
+    viceversa. Confrontando con MAX(snapshot_at) gia' su BigQuery (non con lo stato
+    locale dell'altro scrittore, che nessuno dei due vede), ognuno scrive solo le
+    righe che l'altro non ha ancora visto — nessuna sincronizzazione fra i due
+    stati locali, nessun file condiviso, nessuna corsa possibile fra loro."""
+    if after_snapshot_at is None:
+        return list(engagement_rows)
+    return [r for r in engagement_rows
+            if r.get("snapshot_at") and r["snapshot_at"] > after_snapshot_at]
+
+
 def build_fct_youtube_fixed_window(finestre_records):
     """Staging 1:1 da metriche-finestre-fisse.json (Fase 2). finestre_records e' il
     dict {video_id: record} cosi' com'e' scritto da raccogli_finestre_fisse.py."""

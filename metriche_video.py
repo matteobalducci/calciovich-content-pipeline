@@ -117,7 +117,7 @@ def categoria(key, app_map):
     return "altro"
 
 
-def fetch_stats(video_ids, stats_override=None):
+def fetch_stats(video_ids, stats_override=None, token_path=None, scopes=None):
     """Ritorna {video_id: {"views", "likes", "comments", "privacy"}}.
 
     stats_override e' iniettabile per i test di caratterizzazione: se passato, viene
@@ -126,7 +126,11 @@ def fetch_stats(video_ids, stats_override=None):
 
     check_outliers.py legge solo "views"/"privacy" (comportamento invariato); i campi
     "likes"/"comments" servono a raccogli_metriche_video.py, gia' presenti nella stessa
-    risposta API (part="statistics,status") ma finora non estratti."""
+    risposta API (part="statistics,status") ma finora non estratti.
+
+    token_path/scopes: default = il token condiviso con carica_youtube.py
+    (comportamento di sempre per i chiamanti locali). Solo raccogli_snapshot_cloud.py
+    li passa, per usare il token a sola lettura invece di quello con scope upload."""
     if stats_override is not None:
         return stats_override
 
@@ -134,14 +138,15 @@ def fetch_stats(video_ids, stats_override=None):
     from google.auth.transport.requests import Request
     import googleapiclient.discovery
 
-    if not os.path.exists(TOKEN_PATH):
-        sys.exit(f"Manca {TOKEN_PATH} — non posso leggere le statistiche.")
-    creds = Credentials.from_authorized_user_file(TOKEN_PATH,
-        ["https://www.googleapis.com/auth/youtube.upload",
-         "https://www.googleapis.com/auth/youtube.readonly"])
+    token_path = token_path or TOKEN_PATH
+    scopes = scopes or ["https://www.googleapis.com/auth/youtube.upload",
+                        "https://www.googleapis.com/auth/youtube.readonly"]
+    if not os.path.exists(token_path):
+        sys.exit(f"Manca {token_path} — non posso leggere le statistiche.")
+    creds = Credentials.from_authorized_user_file(token_path, scopes)
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        open(TOKEN_PATH, "w").write(creds.to_json())
+        open(token_path, "w").write(creds.to_json())
     yt = googleapiclient.discovery.build("youtube", "v3", credentials=creds)
 
     out = {}

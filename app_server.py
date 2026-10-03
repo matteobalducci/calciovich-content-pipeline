@@ -18,8 +18,19 @@ solo per lanciare o verificare uno script:
 
 Bind solo su 127.0.0.1: il pannello puo' eseguire script, quindi non deve
 essere raggiungibile dalla rete locale, solo dal browser su questa macchina.
+
+Include anche un watchdog in background (_freshness_watchdog_loop): stato_pipeline
+ha gia' le soglie di freschezza giuste (36h/72h), ma prima erano solo leggibili
+via /api/pipeline-status — un problema restava invisibile finche' qualcuno non
+apriva il pannello di sua iniziativa. E' cosi' che sono passati inosservati per
+giorni due buchi reali di raccolta youtubestats (16-17/09 e 24-27/09, LaunchAgent
+saltato durante cicli di sleep prolungati) — scoperti solo a posteriori dal grafico
+Looker Studio, non dal proprio sistema di controllo. Questo processo gira comunque
+sempre (KeepAlive in com.calciovich.appserver.plist), quindi e' il posto giusto per
+controllare la freschezza ogni 30 min e mandare una notifica macOS quando c'e' un
+flag error/warn — senza dover ricordarsi di aprire il pannello.
 """
-import os, sys, json, subprocess, shutil, re
+import os, sys, json, subprocess, shutil, re, threading, time, datetime
 import http.server
 from socketserver import ThreadingMixIn
 
@@ -77,6 +88,79 @@ FLOWS = {
     "refresh-youtube-stats": lambda i: [sys.executable, "aggiorna_youtube_stats.py"],
     "check-comments": lambda i: [sys.executable, "rispondi_commenti.py", "--list"],
 }
+
+
+WATCHDOG_STATE_PATH = os.path.join(HERE, "output", "watchdog-last-notified.json")
+WATCHDOG_CHECK_SECONDS = 1800  # ogni 30 min
+WATCHDOG_RENOTIFY_HOURS = 12   # se un flag resta attivo, ripeti il promemoria al massimo ogni 12h (non ogni 30 min)
+
+
+def _notify_macos(text, title="Calciovich — controllo pipeline"):
+    """AppleScript via osascript, non un shell string grezzo: display notification
+    vuole gli argomenti come stringhe AppleScript, quindi passiamo title/text come
+    argv separati a un one-liner che li referenzia da 'on run argv' invece di
+    interpolarli a mano in una stringa -e (eviterebbe problemi di escaping ogni
+    volta che un flag contiene virgolette o caratteri speciali, cosa che i testi
+    di stato_pipeline fanno spesso, es. citano id fra «»)."""
+    script = 'on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"\nend run'
+    try:
+        subprocess.run(["osascript", "-e", script, title, text], capture_output=True, timeout=10)
+    except Exception:
+        pass  # una notifica persa non deve mai far cadere il watchdog
+
+
+def _freshness_watchdog_loop():
+    while True:
+        try:
+            status = stato_pipeline.compute_status()
+            # known_issues (debito di canone ecc.) sono backlog stabile con una propria
+            # "since" — gia' visto e deliberatamente rimandato, non "appena scoperto".
+            # compute_status() li rimescola dentro flags senza un tag che li distingua,
+            # quindi li togliamo qui confrontando il testo: altrimenti il watchdog
+            # continuerebbe a far vibrare il telefono ogni 12h per mesi su cose che
+            # Matteo ha gia' deciso di rimandare, allenandolo a ignorare le notifiche —
+            # esattamente il fallimento che questo watchdog dovrebbe evitare.
+            known_issue_texts = {k.get("text", "") for k in status.get("knownIssues", [])}
+            # Chiave = stato_pipeline.flag_key (livello + testo senza numeri), non il
+            # testo grezzo: "da 31 ore" -> "da 32 ore" faceva sembrare nuovo lo stesso
+            # problema a ogni controllo e rinotificava ogni ora invece che ogni 12h.
+            active = {stato_pipeline.flag_key(f.get("level", "warn"), f["text"]): f
+                      for f in status.get("flags", [])
+                      if f.get("level") in ("warn", "error") and f["text"] not in known_issue_texts}
+
+            try:
+                last_notified = json.load(open(WATCHDOG_STATE_PATH, encoding="utf-8"))
+            except Exception:
+                last_notified = {}
+
+            now = datetime.datetime.now()
+            new_state = {}
+            for key, flag in active.items():
+                text, level = flag["text"], flag.get("level", "warn")
+                prev_at = last_notified.get(key)
+                due = True
+                if prev_at:
+                    try:
+                        hours = (now - datetime.datetime.fromisoformat(prev_at)).total_seconds() / 3600
+                        due = hours >= WATCHDOG_RENOTIFY_HOURS
+                    except ValueError:
+                        due = True
+                if due:
+                    prefix = "⚠️" if level == "warn" else "🛑"
+                    _notify_macos(f"{prefix} {text}")
+                    new_state[key] = now.isoformat(timespec="seconds")
+                else:
+                    new_state[key] = prev_at
+            # i flag non piu' attivi spariscono da new_state: se ricompaiono in
+            # futuro ripartono come nuovi, cosa corretta (e' di nuovo un problema
+            # fresco, non una ripetizione di uno gia' notificato).
+
+            os.makedirs(os.path.dirname(WATCHDOG_STATE_PATH), exist_ok=True)
+            with open(WATCHDOG_STATE_PATH, "w", encoding="utf-8") as fh:
+                json.dump(new_state, fh, ensure_ascii=False, indent=1)
+        except Exception:
+            pass  # mai far morire il thread per un errore di un singolo giro
+        time.sleep(WATCHDOG_CHECK_SECONDS)
 
 
 def _enable_yt_autoupload():
@@ -178,6 +262,7 @@ class ThreadingHTTPServer(ThreadingMixIn, http.server.HTTPServer):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=_freshness_watchdog_loop, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Calciovich control panel su http://localhost:{PORT}")
     srv.serve_forever()

@@ -7,7 +7,7 @@ Letto da app_server.py per il pannello "Stato pubblicazioni automatiche" nel tab
 Coach: cosi' non serve piu' aprire la sessione Claude "calciovich daily content"
 solo per sapere se oggi e' andato tutto bene.
 """
-import os, json, glob, plistlib, datetime
+import os, json, glob, plistlib, datetime, re, sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 QUEUE_PATH = os.path.join(HERE, "output", "ai-content-queue.json")
@@ -23,6 +23,21 @@ METRICHE_WARN_HOURS = 36
 METRICHE_ERROR_HOURS = 72
 FINESTRE_WARN_HOURS = 36
 FINESTRE_ERROR_HOURS = 72
+
+# Ritmo di pubblicazione atteso: un video al giorno (slot ~15:00 UTC). Soglie in ore
+# dall'ULTIMO contenuto davvero pubblico, non in "giorni di calendario": 30h = lo slot
+# di oggi e' saltato con ~6h di tolleranza, 54h = ne sono saltati due. Decise guardando
+# il ritmo reale del canale (1/giorno fino al 15/09, buchi fino a 5 giorni il 23-28/09,
+# di nuovo 1/giorno dal 30/09): su un ritmo giornaliero l'avviso utile e' il primo slot
+# mancato, non il quarto giorno — da' tempo di rimediare lo stesso giorno. Se il ritmo
+# cambia (es. 3-4/settimana dopo lo split del canale) basta cambiare questi due numeri.
+PUBLISH_DB = os.path.join(HERE, "output", "publish-state.db")
+CADENCE_WARN_HOURS = 30
+CADENCE_ERROR_HOURS = 54
+CADENCE_UPCOMING_GRACE_HOURS = 12
+# TikTok escluso apposta: va in Inbox come bozza e lo conferma Matteo a mano nell'app,
+# quindi un ritardo li' non e' un guasto della pipeline.
+CADENCE_PLATFORMS = {"youtube": "YouTube", "instagram": "Instagram"}
 
 PLATFORM_KEYS = {"youtube": "youtube", "instagram": "instagram_media_id", "tiktok": "tiktok_publish_id"}
 
@@ -209,6 +224,106 @@ def _finestre_fisse_freshness_flag():
     return None
 
 
+def _parse_utc(value):
+    if not value:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
+
+
+def _public_time(platform, key, updated_at, meta):
+    """Quando un contenuto confermato e' (o sara') pubblico, o None se non lo e'.
+    YouTube: publishAt se programmato (il video e' 'private' fino a quell'ora), altrimenti
+    l'orario di conferma; un 'private' senza publishAt non e' mai uscito. Le Stories
+    Instagram non contano come pubblicazione del ritmo (sono effimere, stesso video)."""
+    if platform == "instagram":
+        if key.startswith("stories/") or meta.get("type") == "story":
+            return None
+        return _parse_utc(updated_at)
+    if platform == "youtube":
+        if meta.get("publishAt"):
+            return _parse_utc(meta["publishAt"])
+        if meta.get("privacy") == "private":
+            return None
+        return _parse_utc(updated_at)
+    return None
+
+
+def _publish_times(platform):
+    conn = sqlite3.connect(f"file:{PUBLISH_DB}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT key, updated_at, meta FROM uploads WHERE platform=? AND state='confirmed'",
+            (platform,)).fetchall()
+    finally:
+        conn.close()
+    times = []
+    for key, updated_at, meta in rows:
+        try:
+            m = json.loads(meta) if meta else {}
+        except ValueError:
+            m = {}
+        t = _public_time(platform, key, updated_at, m)
+        if t:
+            times.append(t)
+    return times
+
+
+def _cadence_flag(label, times, now):
+    """Flag di ritmo per UNA piattaforma, a partire dagli orari pubblici. Funzione pura
+    (testata in test_publish_cadence.py). Ritorna (flag_o_None, ultimo_orario_passato).
+    Se un contenuto e' gia' programmato a breve (entro CADENCE_UPCOMING_GRACE_HOURS) non
+    si avvisa: la pipeline sta funzionando, e' solo lo slot che deve ancora scattare."""
+    past = [t for t in times if t <= now]
+    future = [t for t in times if t > now]
+    if not past:
+        return ({"level": "warn", "text": f"{label}: nessun contenuto pubblico registrato."}, None)
+    last = max(past)
+    hours = (now - last).total_seconds() / 3600
+    if hours < CADENCE_WARN_HOURS:
+        return (None, last)
+    if future and (min(future) - now).total_seconds() / 3600 <= CADENCE_UPCOMING_GRACE_HOURS:
+        return (None, last)
+    last_txt = last.astimezone().strftime("%d/%m %H:%M")
+    level = "error" if hours >= CADENCE_ERROR_HOURS else "warn"
+    return ({"level": level,
+             "text": f"{label}: nessun nuovo video pubblico da {hours:.0f} ore "
+                     f"(ultimo: {last_txt}) — il ritmo atteso e' uno al giorno."}, last)
+
+
+def _publish_cadence_flags(now=None):
+    """Sostituisce il vecchio flag 'nessuna generazione/pubblicazione oggi', che leggeva
+    output/ai-content-queue.json (la coda delle clip AI, ferma al 05/08) e quindi
+    segnalava 59 giorni di inattivita' su un canale che pubblicava ogni giorno. Qui la
+    fonte e' il registro vivo delle pubblicazioni (publish-state.db), per piattaforma.
+    Ritorna (flags, ultimo_orario_pubblico_fra_le_piattaforme_o_None)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    flags, lasts = [], []
+    for platform, label in CADENCE_PLATFORMS.items():
+        try:
+            times = _publish_times(platform)
+        except Exception as e:
+            flags.append({"level": "warn",
+                          "text": f"{label}: impossibile leggere il registro pubblicazioni ({type(e).__name__})."})
+            continue
+        flag, last = _cadence_flag(label, times, now)
+        if flag:
+            flags.append(flag)
+        if last:
+            lasts.append(last)
+    return flags, (max(lasts) if lasts else None)
+
+
+def flag_key(level, text):
+    """Chiave stabile di un flag per il watchdog di app_server.py. I numeri nel testo
+    ("da 31 ore", date) cambiano a ogni controllo: usarli nella chiave faceva sembrare
+    'nuovo' lo stesso problema a ogni giro e rinotificava ogni ora invece che ogni 12h."""
+    return f"{level}|{re.sub(r'[0-9]+', '#', text)}"
+
+
 def compute_status():
     today = _today()
     items = _load_queue_items()
@@ -238,16 +353,11 @@ def compute_status():
     ig_retries = _ig_retry_jobs()
     auto_upload_active = os.path.exists(UPLOAD_PLIST_INSTALLED)
 
-    flags = []
-    if last_activity is None:
-        flags.append({"level": "warn", "text": "Nessuna attività registrata nella coda contenuti AI."})
-    elif last_activity < today:
-        days = (datetime.date.fromisoformat(today) - datetime.date.fromisoformat(last_activity)).days
-        if days >= 1:
-            flags.append({
-                "level": "error" if days >= 2 else "warn",
-                "text": f"Nessuna generazione/pubblicazione oggi — l'ultima attività registrata è del {last_activity} ({days} giorno/i fa).",
-            })
+    flags, last_public = _publish_cadence_flags()
+    # lastActivity (letta anche da coach.py) = ultima pubblicazione REALE; la data della
+    # coda AI resta solo come ripiego se il registro non e' leggibile.
+    if last_public:
+        last_activity = last_public.astimezone().date().isoformat()
     for r in rendered_unpub:
         flags.append({"level": "warn", "text": f"«{r['id']}» è renderizzato ma non ancora pubblicato — controlla le note prima di lanciarlo."})
     for p in published_partial:

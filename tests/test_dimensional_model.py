@@ -224,6 +224,30 @@ def test_engagement_snapshot_is_staging_1_to_1_no_filtering():
                       "snapshot_at": "2026-09-08T21:33:51", "views": 10, "likes": 1, "comments": 0}]
 
 
+def test_filter_new_engagement_rows_keeps_only_strictly_newer():
+    rows = [
+        {"video_id": "v1", "snapshot_at": "2026-09-29T18:08:53", "views": 10},
+        {"video_id": "v2", "snapshot_at": "2026-09-30T00:00:00", "views": 20},
+        {"video_id": "v3", "snapshot_at": "2026-09-30T06:00:00", "views": 30},
+    ]
+    kept = dm.filter_new_engagement_rows(rows, after_snapshot_at="2026-09-30T00:00:00")
+    assert [r["video_id"] for r in kept] == ["v3"]
+
+
+def test_filter_new_engagement_rows_none_cutoff_keeps_everything():
+    rows = [{"video_id": "v1", "snapshot_at": "2026-09-08T21:33:51", "views": 10}]
+    assert dm.filter_new_engagement_rows(rows, after_snapshot_at=None) == rows
+
+
+def test_filter_new_engagement_rows_empty_remote_cutoff_matches_nothing_extra():
+    """Caso del migration day: storico locale e BigQuery hanno esattamente lo stesso
+    ultimo snapshot_at -> zero righe nuove, nessuna duplicazione al primo run con la
+    scrittura incrementale."""
+    rows = [{"video_id": "v1", "snapshot_at": "2026-09-29T18:08:53", "views": 10}]
+    kept = dm.filter_new_engagement_rows(rows, after_snapshot_at="2026-09-29T18:08:53")
+    assert kept == []
+
+
 def test_fixed_window_reads_the_dict_of_records_by_video_id():
     records = {"v1": {"video_id": "v1", "key": "short01.vert", "views_day7": 100}}
     rows = dm.build_fct_youtube_fixed_window(records)
