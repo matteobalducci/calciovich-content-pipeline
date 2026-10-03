@@ -56,7 +56,12 @@ def main():
           "calciovich-video-analytics)...")
     flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET, ANALYTICS_SCOPES)
     creds = flow.run_local_server(port=0)
-    open(TOKEN_PATH, "w").write(creds.to_json())
+    # 0o600 come youtube_readonly_auth.py: un token con refresh_token non deve essere
+    # leggibile da altri utenti della macchina (il refresh sopra riscrive il file in
+    # place, quindi i permessi restano quelli impostati qui).
+    fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(creds.to_json())
     print(f"OK — token salvato in {TOKEN_PATH}")
 
 
