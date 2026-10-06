@@ -13,7 +13,7 @@ per scelta — vedi .gitignore e il commento in cima a carica_bigquery.py), ques
 script non ha e non vuole uno storico locale proprio: prende UNA sola fotografia
 fresca per run e la scrive su BigQuery con WRITE_APPEND, usando lo stesso
 meccanismo anti-duplicazione del path Mac (dm.filter_new_engagement_rows contro
-MAX(snapshot_at) gia' remoto, via cb._max_engagement_snapshot_at) — qui e' quasi
+le chiavi (canale, video, snapshot_at) gia' remote, via cb._existing_engagement_keys) — qui e' quasi
 sempre un no-op perche' ogni riga porta un timestamp "adesso" per forza piu'
 recente di qualunque storico, ma e' lo stesso codice del path Mac: un solo punto
 dove questa logica puo' avere un bug, non due copie che possono divergere.
@@ -58,20 +58,24 @@ READONLY_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 def _snapshot_at_now():
     """Ora di Roma, senza fuso: la STESSA convenzione di raccogli_metriche_video.py
     (datetime.now() sul Mac, che e' in Italia). Il runner GitHub e' in UTC: con
-    datetime.now() nudo scriverebbe orari 1-2 ore indietro nella stessa colonna, e il
-    confronto per stringa di dm.filter_new_engagement_rows scarterebbe un giro cloud
-    subito dopo una scrittura del Mac (scoperto il 2026-10-03: un run manuale "success"
-    che aveva scritto 0 righe). Due convenzioni nella stessa colonna = filtro rotto."""
+    datetime.now() nudo scriverebbe orari 1-2 ore indietro nella stessa colonna: gli snapshot dei due scrittori
+    non sarebbero confrontabili e la serie temporale di un video sarebbe incoerente (scoperto il 2026-10-03,
+    quando il vecchio filtro per limite scarto' un giro cloud: un run "success" con 0 righe scritte). Il filtro
+    ora e' per chiave esatta (canale, video, snapshot_at), ma la convenzione oraria resta una sola nella colonna."""
     return datetime.now(ZoneInfo("Europe/Rome")).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 def _known_video_content_keys(client, bigquery):
-    """{video_id: content_key} da tutto lo storico gia' su BigQuery — niente
-    app/data.json (non esiste in un checkout CI), niente registry locali."""
+    """{video_id: content_key} dei video del canale ORIGINALE gia' su BigQuery — niente app/data.json (non esiste
+    in un checkout CI), niente registry locali. Solo il canale originale: questo job ha il token (a sola lettura)
+    di quel canale e scrive righe etichettate con quel canale. Le righe storiche con channel_key NULL sono
+    del canale originale. I video del canale del libro NON si raccolgono da qui: servirebbe un job e un secret
+    separati per quel canale (la Data API legge le statistiche pubbliche di qualunque video, quindi senza
+    questo filtro il job scriverebbe righe del canale nuovo con l'etichetta sbagliata)."""
     table_id = f"{cb.PROJECT}.{cb.DATASET}.fct_youtube_engagement_snapshot"
     rows = client.query(
         f"SELECT DISTINCT video_id, content_key FROM `{table_id}` "
-        f"WHERE video_id IS NOT NULL"
+        f"WHERE video_id IS NOT NULL AND COALESCE(channel_key, '{dm.LEGACY_CHANNEL}') = '{dm.LEGACY_CHANNEL}'"
     ).result()
     return {r["video_id"]: r["content_key"] for r in rows}
 
@@ -94,7 +98,8 @@ def main():
         sys.exit("Nessun video noto su BigQuery (tabella vuota) — niente da "
                   "aggiornare, il Mac deve girare almeno una volta per primo.")
 
-    stats = fetch_stats(video_ids, token_path=READONLY_TOKEN, scopes=READONLY_SCOPES)
+    stats = fetch_stats(video_ids, token_path=READONLY_TOKEN, scopes=READONLY_SCOPES,
+                        expect_channel_id=cb.CHANNEL_IDS[dm.LEGACY_CHANNEL])
     snapshot_at = _snapshot_at_now()
 
     rows = []
@@ -111,10 +116,13 @@ def main():
             "views": info.get("views"),
             "likes": info.get("likes"),
             "comments": info.get("comments"),
+            "channel_key": dm.LEGACY_CHANNEL,
         })
 
-    max_remote = cb._max_engagement_snapshot_at(client, bigquery)
-    new_rows = dm.filter_new_engagement_rows(rows, max_remote)
+    schema = cb._schemas(bigquery)["fct_youtube_engagement_snapshot"]
+    cb._ensure_table(client, bigquery, "fct_youtube_engagement_snapshot", schema)
+    remote_keys = cb._existing_engagement_keys(client)
+    new_rows = dm.filter_new_engagement_rows(rows, remote_keys)      # per chiave esatta, non per limite
 
     if rows and not new_rows:
         # Non e' piu' un caso legittimo: con la stessa convenzione oraria del Mac, ogni
@@ -122,10 +130,9 @@ def main():
         # scritte su video che ci sono = qualcosa non va, e un run verde non deve
         # nasconderlo (e' esattamente cosi' che il bug dei fusi e' passato inosservato).
         sys.exit(f"Nessuna riga scritta su {len(rows)} video raccolti (snapshot_at="
-                  f"{snapshot_at}, max remoto={max_remote}) — controlla la convenzione "
+                  f"{snapshot_at}, {len(remote_keys)} chiavi gia' remote) — controlla la convenzione "
                   f"oraria di snapshot_at fra Mac e cloud.")
 
-    schema = cb._schemas(bigquery)["fct_youtube_engagement_snapshot"]
     cb._write_table(client, bigquery, "fct_youtube_engagement_snapshot", new_rows,
                      schema, write_disposition="WRITE_APPEND")
     print(f"✓ fct_youtube_engagement_snapshot (cloud): {len(new_rows)} righe nuove "

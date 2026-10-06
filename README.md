@@ -320,11 +320,22 @@ report down:
   timestamped copy.
 - **Order of rollout:** add the columns → replace the views → write the new rows, each step compared
   to a snapshot of the views taken just before. The loader was paused while the schema changed.
-- **Scope, honestly:** engagement metrics (`fct_youtube_*`) still cover only the original channel.
-  Collecting the new channel's statistics is a later step, and it has a precondition: the
-  video-performance view joins on `content_key`, so a `channel_key` has to reach the engagement
-  facts first or a republished video would show up twice there. A video made private stops being
-  collected by design, so the last snapshot is frozen before each batch is hidden.
+- **Engagement per channel.** The per-video collector now runs once per channel — separate history files, the
+  channel's own token, and an ownership check (`channels.list(mine=True)`) before reading, because the Data API
+  returns public statistics for any video and a wrong-channel token would otherwise just write rows labelled with
+  the wrong channel. The engagement and fixed-window facts carry a `channel_key` (historical rows are NULL, which
+  every view reads as the original channel). The two views the published report already reads are filtered to the
+  original channel *inside* their CTEs and returned the same rows and column types as before; the by-channel
+  versions sit next to them.
+- **Idempotence by exact key, not by watermark.** The first design wrote only rows newer than `MAX(snapshot_at)`
+  already in BigQuery. Review showed it loses valid rows when two writers (the Mac and GitHub Actions) interleave:
+  a 10:00 row not yet uploaded is dropped because the cloud already wrote 12:00. The loader now reads the existing
+  `(channel, video, snapshot_at)` keys and writes what is actually missing; a read failure stops the run instead of
+  being treated as an empty table. The project is on BigQuery's free tier, which has no DML, so duplicates from two
+  writers starting together cannot be prevented or deleted — a canonical view drops them at read time.
+- **Scope, honestly:** YouTube Analytics (retention, fixed windows) still exists only for the original channel; the
+  new channel lacks that consent. A video made private stops being collected by design, so its series freezes at the
+  last value rather than dropping.
 
 ## Roadmap
 

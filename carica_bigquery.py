@@ -73,13 +73,19 @@ from metriche_video import load, load_confirmed_uploads, load_confirmed_youtube_
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT = os.path.join(HERE, "output")
 APP_DATA = os.path.join(HERE, "app", "data.json")
-STORICO = os.path.join(OUTPUT, "metriche-video-storico.json")
-FINESTRE = os.path.join(OUTPUT, "metriche-finestre-fisse.json")
+STORICO = os.path.join(OUTPUT, "metriche-video-storico.json")                       # canale ORIGINALE
+STORICO_NEW = os.path.join(OUTPUT, "metriche-video-storico-calciovich.json")        # canale del libro
+FINESTRE = os.path.join(OUTPUT, "metriche-finestre-fisse.json")                     # solo canale originale (Analytics)
+CHANNEL_IDS = {"gol-impossibili": "UCLPBYAv19aizEYX4MmXV7rA", "calciovich": "UCy1V7Lwaeb8_6iaSEzSOtPA"}
 YT_UPLOADS = os.path.join(OUTPUT, "youtube-uploads.json")                   # canale ORIGINALE (oggi Gol Impossibili)
 YT_UPLOADS_NEW = os.path.join(OUTPUT, "youtube-calciovich-uploads.json")    # canale del libro (dal 06/10/2026)
-CHANNEL_IDS = {"gol-impossibili": "UCLPBYAv19aizEYX4MmXV7rA", "calciovich": "UCy1V7Lwaeb8_6iaSEzSOtPA"}
 IG_UPLOADS = os.path.join(OUTPUT, "instagram-uploads.json")
 TK_UPLOADS = os.path.join(OUTPUT, "tiktok-uploads.json")
+
+# Da questo istante (ora locale, stesso formato di snapshot_at) OGNI riga nuova di engagement deve avere channel_key:
+# le righe storiche NULL sono del canale originale, ma una riga nuova senza canale significa uno scrittore vecchio
+# o rotto (un checkout non aggiornato) e va segnalata.
+CHANNEL_KEY_REQUIRED_FROM = "2026-10-07T00:00:00"
 
 PROJECT = "calciovich-video-analytics"
 DATASET = "calciovich_content"
@@ -95,7 +101,15 @@ def build_all():
     valid_keys = {r["content_key"] for r in dim_content_rows}
 
     storico = load(STORICO, {"records": []})
-    engagement_rows = dm.build_fct_youtube_engagement_snapshot(storico.get("records", []))
+    storico_new = load(STORICO_NEW, {"records": []})
+    for r in storico.get("records", []):
+        if r.get("channel_key") not in (None, dm.LEGACY_CHANNEL):   # file originale: righe storiche senza canale o del suo canale
+            raise ValueError(f"{STORICO}: riga con channel_key={r.get('channel_key')!r} per il video {r.get('video_id')}")
+    for r in storico_new.get("records", []):
+        if r.get("channel_key") != "calciovich":    # il file del canale nuovo non puo' contenere altro
+            raise ValueError(f"{STORICO_NEW}: riga con channel_key={r.get('channel_key')!r} per il video {r.get('video_id')}")
+    engagement_rows = dm.build_fct_youtube_engagement_snapshot(
+        storico.get("records", []) + storico_new.get("records", []))
 
     finestre = load(FINESTRE, {"records": {}})
     fixed_window_rows = dm.build_fct_youtube_fixed_window(finestre.get("records", {}))
@@ -164,6 +178,7 @@ def _schemas(bigquery):
             bigquery.SchemaField("views", "INTEGER"),
             bigquery.SchemaField("likes", "INTEGER"),
             bigquery.SchemaField("comments", "INTEGER"),
+            bigquery.SchemaField("channel_key", "STRING"),
         ],
         "fct_youtube_fixed_window": [
             bigquery.SchemaField("video_id", "STRING", mode="REQUIRED"),
@@ -171,6 +186,7 @@ def _schemas(bigquery):
             bigquery.SchemaField("views_day1", "INTEGER"),
             bigquery.SchemaField("views_day2", "INTEGER"),
             bigquery.SchemaField("views_day7", "INTEGER"),
+            bigquery.SchemaField("channel_key", "STRING"),
         ],
         "fct_publish_event": [
             bigquery.SchemaField("content_key", "STRING", mode="REQUIRED"),
@@ -208,27 +224,50 @@ def _bigquery_client(bigquery, service_account):
     return bigquery.Client(project=PROJECT, credentials=creds)
 
 
-def _max_engagement_snapshot_at(client, bigquery):
-    """MAX(snapshot_at) gia' presente su BigQuery per fct_youtube_engagement_snapshot,
-    formattata per combaciare ESATTAMENTE con le stringhe locali ("%Y-%m-%dT%H:%M:%S",
-    senza offset) per un confronto per stringa diretto in dm.filter_new_engagement_rows.
-    Deliberatamente FORMAT_TIMESTAMP, non CAST(...AS STRING): CAST produce
-    "2026-09-29 18:08:53+00" (spazio, offset esplicito) che confrontato come stringa
-    con "2026-09-29T18:08:53" non ordina in modo sensato (scoperto prima di
-    qualunque run reale, con un confronto diretto delle due stringhe). None se la
-    tabella non esiste ancora o e' vuota: in quel caso filter_new_engagement_rows
-    non filtra nulla, comportamento corretto per il primissimo run."""
+def _ensure_table(client, bigquery, table_name, schema):
+    """Crea la tabella se manca (schema esplicito). Va fatto PRIMA di leggerla: cosi' un errore di lettura non puo'
+    mai essere scambiato per 'tabella vuota'."""
+    client.create_table(bigquery.Table(f"{PROJECT}.{DATASET}.{table_name}", schema=schema), exists_ok=True)
+
+
+def _existing_engagement_keys(client):
+    """Insieme delle chiavi (canale, video, snapshot_at) gia' su BigQuery, nello stesso formato delle stringhe
+    locali ("%Y-%m-%dT%H:%M:%S", senza offset) per un confronto diretto. Deliberatamente FORMAT_TIMESTAMP, non
+    CAST(...AS STRING): CAST produce "2026-09-29 18:08:53+00" (spazio, offset) che non combacia con le stringhe locali.
+    Le righe storiche con channel_key NULL contano come canale originale.
+
+    FAIL-CLOSED: qualunque errore (permessi, rete, schema) si propaga e lo script si ferma. Un tentativo precedente
+    trattava ogni errore come 'tabella vuota' e avrebbe riappeso l'intero storico locale."""
     table_id = f"{PROJECT}.{DATASET}.fct_youtube_engagement_snapshot"
-    try:
-        rows = list(client.query(
-            f"SELECT FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%S', MAX(snapshot_at)) AS m "
-            f"FROM `{table_id}`"
-        ).result())
-    except Exception:
-        return None
-    if not rows or rows[0]["m"] is None:
-        return None
-    return rows[0]["m"]
+    rows = client.query(
+        f"SELECT DISTINCT COALESCE(channel_key, '{dm.LEGACY_CHANNEL}') AS ch, video_id, "
+        f"FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%S', snapshot_at) AS ts FROM `{table_id}`"
+    ).result()
+    return {(r["ch"], r["video_id"], r["ts"]) for r in rows}
+
+
+def _null_channel_rows_since(client, boundary=CHANNEL_KEY_REQUIRED_FROM):
+    """Quante righe di engagement SCRITTE dopo `boundary` non hanno channel_key. Dopo lo split ogni scrittore valorizza
+    il canale: una riga nuova senza canale = scrittore vecchio o rotto (es. un checkout non aggiornato) e il
+    COALESCE delle viste la farebbe passare per 'canale originale' in silenzio."""
+    table_id = f"{PROJECT}.{DATASET}.fct_youtube_engagement_snapshot"
+    r = list(client.query(
+        f"SELECT COUNT(*) AS n FROM `{table_id}` WHERE channel_key IS NULL "
+        f"AND snapshot_at >= TIMESTAMP('{boundary}')"
+    ).result())
+    return r[0]["n"]
+
+
+def _duplicate_engagement_keys(client):
+    """Quante chiavi (canale, video, snapshot_at) compaiono piu' di una volta nella fact. Non e' un errore: la
+    vista v_engagement_canonico le elimina in lettura (il progetto e' senza DML, quindi non si possono impedire
+    ne' cancellare in scrittura). Ma si conta e si dice, cosi' una deriva non resta invisibile."""
+    table_id = f"{PROJECT}.{DATASET}.fct_youtube_engagement_snapshot"
+    r = list(client.query(
+        f"SELECT COUNT(*) AS n FROM (SELECT 1 FROM `{table_id}` "
+        f"GROUP BY COALESCE(channel_key, '{dm.LEGACY_CHANNEL}'), video_id, snapshot_at HAVING COUNT(*) > 1)"
+    ).result())
+    return r[0]["n"]
 
 
 def _write_table(client, bigquery, table_name, rows, schema, write_disposition):
@@ -288,15 +327,26 @@ def main():
         written.append(name)
         print(f"✓ {name} scritta ({len(tables[name])} righe)")
 
-    max_remote = _max_engagement_snapshot_at(client, bigquery)
+    _ensure_table(client, bigquery, "fct_youtube_engagement_snapshot", schemas["fct_youtube_engagement_snapshot"])
+    remote_keys = _existing_engagement_keys(client)
     new_engagement_rows = dm.filter_new_engagement_rows(
-        tables["fct_youtube_engagement_snapshot"], max_remote)
+        tables["fct_youtube_engagement_snapshot"], remote_keys)
     _write_table(client, bigquery, "fct_youtube_engagement_snapshot", new_engagement_rows,
                  schemas["fct_youtube_engagement_snapshot"], write_disposition="WRITE_APPEND")
     written.append("fct_youtube_engagement_snapshot")
     print(f"✓ fct_youtube_engagement_snapshot scritta ({len(new_engagement_rows)} righe "
-          f"nuove su {len(tables['fct_youtube_engagement_snapshot'])} nello storico locale"
-          f"{', max remoto ' + max_remote if max_remote else ', prima scrittura'})")
+          f"nuove su {len(tables['fct_youtube_engagement_snapshot'])} nello storico locale, "
+          f"{len(remote_keys)} chiavi gia' remote)")
+    dups = _duplicate_engagement_keys(client)
+    if dups:
+        print(f"ℹ️  {dups} chiavi (canale, video, snapshot_at) duplicate nella fact: innocue, le elimina "
+              f"v_engagement_canonico in lettura (due scrittori partiti insieme).")
+    null_rows = _null_channel_rows_since(client)
+    if null_rows:
+        print(f"⛔ {null_rows} righe di engagement scritte dopo {CHANNEL_KEY_REQUIRED_FROM} senza channel_key: "
+              f"uno scrittore vecchio o rotto (checkout non aggiornato?). Le viste le leggono come canale originale. "
+              f"Il run NON viene registrato come completato.")
+        sys.exit(1)
 
     run_row = {
         "run_id": uuid.uuid4().hex,
@@ -306,6 +356,7 @@ def main():
     _write_table(client, bigquery, "_run_metadata", [run_row], schemas["_run_metadata"],
                  write_disposition="WRITE_APPEND")
     print(f"✓ _run_metadata: run {run_row['run_id']} completato ({len(written)} tabelle)")
+
 
 
 if __name__ == "__main__":

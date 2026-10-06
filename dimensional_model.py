@@ -174,53 +174,77 @@ def build_dim_date(dates):
 
 
 def build_fct_youtube_engagement_snapshot(storico_records):
-    """Staging 1:1 dal JSON sorgente (metriche-video-storico.json) — nessuna
-    aggregazione a monte, nessun filtro di scope: e' gia' scoped a upload YouTube
-    confermati da raccogli_metriche_video.py (Fase 1). Il grain (video_id,
-    snapshot_at) resta quello del sorgente, deliberatamente: i cluster di snapshot
-    ravvicinati osservati in sviluppo sono artefatti (riavvii del LaunchAgent), non
-    un regime stazionario su cui decidere un'aggregazione — quella si fa a livello
-    di vista SQL nel mart, non qui."""
-    return [{
-        "video_id": r.get("video_id"),
-        "content_key": r.get("key"),
-        "snapshot_at": r.get("snapshot_at"),
-        "views": r.get("views"),
-        "likes": r.get("likes"),
-        "comments": r.get("comments"),
-    } for r in storico_records]
+    """Staging 1:1 dai JSON sorgente (uno per canale: metriche-video-storico.json = canale ORIGINALE,
+    metriche-video-storico-calciovich.json = canale del libro) — nessuna aggregazione a monte, nessun
+    filtro di scope: e' gia' scoped a upload YouTube confermati da raccogli_metriche_video.py (Fase 1).
+    Il grain e' (channel_key, video_id, snapshot_at). Le righe storiche scritte prima dello split non
+    hanno `channel_key`: appartengono al canale originale (LEGACY_CHANNEL). Un valore sconosciuto e'
+    un errore, non un default silenzioso. I cluster di snapshot ravvicinati osservati in sviluppo sono
+    artefatti (riavvii del LaunchAgent), non un regime su cui decidere un'aggregazione: quella si fa
+    a livello di vista SQL nel mart."""
+    rows = []
+    for r in storico_records:
+        # FAIL-CLOSED sullo storico malformato: una riga senza video o senza istante non e' un caso da scartare
+        # in silenzio (la tabella ha snapshot_at REQUIRED): e' un guasto del collector e va visto.
+        if not r.get("video_id") or not r.get("snapshot_at"):
+            raise ValueError(f"riga di storico malformata (video_id={r.get('video_id')!r}, "
+                             f"snapshot_at={r.get('snapshot_at')!r})")
+        channel = r.get("channel_key") or LEGACY_CHANNEL
+        if channel not in {c["channel_key"] for c in CHANNELS}:
+            raise ValueError(f"channel_key sconosciuto '{channel}' nello storico (video {r.get('video_id')})")
+        rows.append({
+            "video_id": r.get("video_id"),
+            "content_key": r.get("key"),
+            "snapshot_at": r.get("snapshot_at"),
+            "views": r.get("views"),
+            "likes": r.get("likes"),
+            "comments": r.get("comments"),
+            "channel_key": channel,
+        })
+    return rows
 
 
-def filter_new_engagement_rows(engagement_rows, after_snapshot_at):
-    """Righe con snapshot_at strettamente piu' recente di after_snapshot_at (stringa
-    ISO locale, stesso formato ovunque in questo progetto — confronto per stringa,
-    niente parsing datetime/timezone). after_snapshot_at None = nessun filtro,
-    prendi tutto (tabella remota non ancora creata o vuota).
+def engagement_key(row):
+    """Chiave di idempotenza di una riga di engagement: (canale, video, snapshot_at). Le righe storiche senza
+    canale sono del canale originale. snapshot_at e' la stringa ISO locale senza fuso, ovunque nel progetto."""
+    return (row.get("channel_key") or LEGACY_CHANNEL, row.get("video_id"), row.get("snapshot_at"))
 
-    Esiste perche' fct_youtube_engagement_snapshot e' passata da WRITE_TRUNCATE a
-    WRITE_APPEND (vedi carica_bigquery.py): da quando la raccolta gira anche da
-    GitHub Actions come backstop per i buchi del LaunchAgent locale, ci sono due
-    scrittori indipendenti con storici locali diversi — il Mac non deve poter
-    cancellare con un truncate cio' che GitHub Actions ha scritto nel frattempo, e
-    viceversa. Confrontando con MAX(snapshot_at) gia' su BigQuery (non con lo stato
-    locale dell'altro scrittore, che nessuno dei due vede), ognuno scrive solo le
-    righe che l'altro non ha ancora visto — nessuna sincronizzazione fra i due
-    stati locali, nessun file condiviso, nessuna corsa possibile fra loro."""
-    if after_snapshot_at is None:
+
+def filter_new_engagement_rows(engagement_rows, existing_keys):
+    """Le righe la cui chiave (canale, video, snapshot_at) NON e' gia' su BigQuery.
+
+    existing_keys: insieme di engagement_key() gia' remoti, oppure None (tabella non ancora popolata: tutto e' nuovo).
+
+    PERCHE' LE CHIAVI E NON UN LIMITE (MAX(snapshot_at)): fct_youtube_engagement_snapshot e' WRITE_APPEND e ha due
+    scrittori indipendenti (il Mac e GitHub Actions). Con un limite, uno snapshot del Mac delle 10:00 non ancora
+    caricato veniva SCARTATO se nel frattempo il cloud aveva scritto quello delle 12:00 (il Mac vedeva MAX=12:00):
+    righe valide perse in silenzio. Con le chiavi si carica tutto cio' che manca davvero. Resta la gara residua: due
+    scrittori che partono insieme possono scrivere la stessa riga due volte; il progetto e' senza DML (livello
+    gratuito: niente MERGE/UPDATE/DELETE), quindi i doppioni li elimina la VISTA v_engagement_canonico in lettura.
+    Nel ritorno dall'ora legale (l'ora 02:xx si ripete) un confronto per chiave non scarta piu' una raccolta reale
+    solo perche' la sua stringa oraria e' minore di un'altra (difetto del limite MAX). Resta una collisione
+    TEORICA: due raccolte dello stesso video allo stesso secondo locale nelle due occorrenze dell'ora ripetuta
+    avrebbero la stessa chiave e la seconda verrebbe vista come gia' presente. La convenzione storica (ora locale
+    senza fuso) non si cambia retroattivamente; con una raccolta ogni 6 ore e' una probabilita' trascurabile.
+
+    Il filtro NON valida: le righe malformate (senza video o senza istante) le rifiuta build_fct_youtube_engagement_snapshot."""
+    if existing_keys is None:
         return list(engagement_rows)
-    return [r for r in engagement_rows
-            if r.get("snapshot_at") and r["snapshot_at"] > after_snapshot_at]
+    return [r for r in engagement_rows if engagement_key(r) not in existing_keys]
 
 
-def build_fct_youtube_fixed_window(finestre_records):
-    """Staging 1:1 da metriche-finestre-fisse.json (Fase 2). finestre_records e' il
-    dict {video_id: record} cosi' com'e' scritto da raccogli_finestre_fisse.py."""
+def build_fct_youtube_fixed_window(finestre_records, channel_key=LEGACY_CHANNEL):
+    """Staging 1:1 da metriche-finestre-fisse.json (Fase 2). finestre_records e' il dict {video_id: record}
+    cosi' com'e' scritto da raccogli_finestre_fisse.py. Le finestre fisse vengono da YouTube Analytics, che
+    oggi esiste SOLO per il canale originale (il canale nuovo non ha ancora il consenso `yt-analytics.readonly`):
+    `channel_key` e' quindi quello del canale che le ha prodotte, dichiarato dal chiamante."""
     return [{
         "video_id": rec.get("video_id"),
         "content_key": rec.get("key"),
         "views_day1": rec.get("views_day1"),
         "views_day2": rec.get("views_day2"),
         "views_day7": rec.get("views_day7"),
+        "channel_key": channel_key,
     } for rec in finestre_records.values()]
 
 

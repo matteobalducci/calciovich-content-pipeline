@@ -29,6 +29,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setattr(cb, "OUTPUT", str(output))
     monkeypatch.setattr(cb, "APP_DATA", str(app_dir / "data.json"))
     monkeypatch.setattr(cb, "STORICO", str(output / "metriche-video-storico.json"))
+    monkeypatch.setattr(cb, "STORICO_NEW", str(output / "metriche-video-storico-calciovich.json"))
     monkeypatch.setattr(cb, "FINESTRE", str(output / "metriche-finestre-fisse.json"))
     monkeypatch.setattr(cb, "YT_UPLOADS", str(output / "youtube-uploads.json"))
     monkeypatch.setattr(cb, "YT_UPLOADS_NEW", str(output / "youtube-calciovich-uploads.json"))
@@ -167,3 +168,113 @@ def test_build_all_declares_both_channels(repo):
     write_app_data(app_dir)
     tables, _ = cb.build_all()
     assert {c["channel_key"] for c in tables["dim_channel"]} == {"gol-impossibili", "calciovich"}
+
+
+def write_json(path, data):
+    path.write_text(json.dumps(data))
+
+
+def test_build_all_reads_the_history_of_both_channels_and_labels_each_row(repo):
+    output, app_dir = repo
+    write_app_data(app_dir, item("/output/short01.mp4"))
+    write_json(output / "metriche-video-storico.json", {"records": [
+        {"video_id": "vOLD", "key": "short01", "snapshot_at": "2026-10-06T10:00:00", "views": 5, "likes": 1, "comments": 0}]})
+    write_json(output / "metriche-video-storico-calciovich.json", {"records": [
+        {"video_id": "vNEW", "key": "short01", "snapshot_at": "2026-10-06T10:00:00", "views": 2, "likes": 0,
+         "comments": 0, "channel_key": "calciovich"}]})
+    tables, _ = cb.build_all()
+    got = {(r["video_id"], r["channel_key"]) for r in tables["fct_youtube_engagement_snapshot"]}
+    assert got == {("vOLD", "gol-impossibili"), ("vNEW", "calciovich")}
+
+
+def test_the_new_channel_file_cannot_hold_rows_of_another_channel(repo):
+    output, app_dir = repo
+    write_app_data(app_dir)
+    write_json(output / "metriche-video-storico-calciovich.json", {"records": [
+        {"video_id": "v", "key": "k", "snapshot_at": "t", "channel_key": "gol-impossibili"}]})
+    with pytest.raises(ValueError):
+        cb.build_all()
+
+
+def test_fixed_windows_are_labelled_with_the_original_channel(repo):
+    output, app_dir = repo
+    write_app_data(app_dir)
+    write_json(output / "metriche-finestre-fisse.json", {"records": {"v": {"video_id": "v", "key": "k", "views_day7": 9}}})
+    tables, _ = cb.build_all()
+    assert tables["fct_youtube_fixed_window"][0]["channel_key"] == "gol-impossibili"
+
+
+def test_the_engagement_schema_has_a_channel_column():
+    class FakeField:
+        def __init__(self, name, kind, mode="NULLABLE"):
+            self.name, self.kind, self.mode = name, kind, mode
+
+    class FakeBQ:
+        SchemaField = FakeField
+    schemas = cb._schemas(FakeBQ)
+    for table in ("fct_youtube_engagement_snapshot", "fct_youtube_fixed_window"):
+        assert "channel_key" in [f.name for f in schemas[table]]
+
+
+def test_the_original_history_file_cannot_hold_rows_of_the_new_channel(repo):
+    output, app_dir = repo
+    write_app_data(app_dir)
+    write_json(output / "metriche-video-storico.json", {"records": [
+        {"video_id": "v", "key": "k", "snapshot_at": "t", "channel_key": "calciovich"}]})
+    with pytest.raises(ValueError):
+        cb.build_all()
+
+
+class FakeRows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def result(self):
+        return self.rows
+
+
+class FakeClient:
+    def __init__(self, rows=None, boom=None):
+        self.rows, self.boom, self.sql = rows or [], boom, []
+
+    def query(self, sql):
+        self.sql.append(sql)
+        if self.boom:
+            raise self.boom
+        return FakeRows(self.rows)
+
+
+def test_remote_keys_come_from_the_table_with_legacy_null_as_the_original_channel():
+    client = FakeClient([{"ch": "gol-impossibili", "video_id": "v", "ts": "2026-10-06T10:00:00"}])
+    assert cb._existing_engagement_keys(client) == {("gol-impossibili", "v", "2026-10-06T10:00:00")}
+    assert "COALESCE(channel_key, 'gol-impossibili')" in client.sql[0] and "FORMAT_TIMESTAMP" in client.sql[0]
+
+
+def test_an_error_reading_the_remote_keys_stops_the_loader_instead_of_appending_everything():
+    with pytest.raises(RuntimeError):
+        cb._existing_engagement_keys(FakeClient(boom=RuntimeError("403 permission denied")))
+
+
+def test_new_engagement_rows_without_a_channel_are_detected():
+    client = FakeClient([{"n": 3}])
+    assert cb._null_channel_rows_since(client) == 3
+    assert "channel_key IS NULL" in client.sql[0] and cb.CHANNEL_KEY_REQUIRED_FROM in client.sql[0]
+
+
+def test_duplicate_keys_are_counted_not_hidden():
+    assert cb._duplicate_engagement_keys(FakeClient([{"n": 2}])) == 2
+
+
+def test_a_malformed_row_in_either_history_file_stops_the_loader(repo):
+    output, app_dir = repo
+    write_app_data(app_dir)
+    write_json(output / "metriche-video-storico-calciovich.json", {"records": [
+        {"video_id": "v", "key": "k", "snapshot_at": None, "channel_key": "calciovich"}]})
+    with pytest.raises(ValueError):
+        cb.build_all()
+
+
+def test_remote_keys_are_read_as_distinct():
+    client = FakeClient([])
+    cb._existing_engagement_keys(client)
+    assert "SELECT DISTINCT" in client.sql[0]

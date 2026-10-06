@@ -248,3 +248,40 @@ engagement rows.
 
 **Files.** `dimensional_model.py` (`SOURCES`, `build_fct_publish_event`, `build_dim_content_lineage`),
 `carica_bigquery.py`, `sql/mart/views.sql`, `sql/ddl/staging.sql`, `tests/test_views_sql_bigquery.py`.
+
+
+---
+
+### ENG-7: a "newer than MAX" filter silently loses rows when two writers interleave
+
+**Tag:** `DATA-INTEGRITY`
+
+**Symptom.** None observed — found in review before the second channel's data was added.
+
+**Root cause.** `fct_youtube_engagement_snapshot` is appended by two independent processes with different local
+histories. To avoid duplicates, each wrote only rows with `snapshot_at` greater than `MAX(snapshot_at)` already in
+BigQuery. Read-max-then-append is not atomic, and the filter is also wrong on its own terms: if the cloud writes a
+12:00 row while the Mac still holds an unwritten 10:00 row, the Mac reads `MAX = 12:00` and drops the 10:00 row. A
+global maximum was also wrong for two channels, since a recent snapshot of one channel would hide an unwritten older
+snapshot of the other. The autumn clock change (a repeated 02:xx hour) fails the same comparison.
+
+**Fix.** Idempotence by exact key: read the `(channel, video, snapshot_at)` keys already present and write the ones
+that are not. Reads fail closed (an earlier draft treated any error as "table empty" and would have re-appended the
+whole local history). The merge that would normally do this is unavailable — the project has no DML on the free
+tier — so the residual race (two writers starting together) is absorbed by a canonical view that keeps one row per
+key, and the loader counts and reports duplicates instead of hiding them. A post-load check flags rows written after
+the cutover without a channel, which also catches a stale checkout of the writer.
+
+**Known limit.** The key is the local wall-clock string, so two collections of the same video at the exact same
+second in the two passes of the repeated autumn hour would collide; with a collection every six hours this is
+negligible, and the historical convention is not changed retroactively. A malformed history row (no video or no
+timestamp) is a hard error in the builder, not something the filter quietly drops.
+
+**Verification.** Unit tests for the 10:00/12:00 case, the repeated clock hour, the two-channel key, legacy rows
+and a failing read; SQL tests on synthetic rows against live BigQuery for the canonical view and the legacy views
+(including a republished video that must not be counted twice); the real migration compared the four views the
+report reads row-for-row and column-for-column before and after, ran the loader twice (second run: 0 new rows,
+0 duplicate keys), and a manual cloud run with the new code wrote labelled rows.
+
+**Files.** `dimensional_model.py` (`filter_new_engagement_rows`), `carica_bigquery.py`, `raccogli_snapshot_cloud.py`,
+`sql/mart/views.sql` (`v_engagement_canonico`), `tests/test_views_sql_bigquery.py`.

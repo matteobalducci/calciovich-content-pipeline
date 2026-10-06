@@ -31,7 +31,9 @@ def repo(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rmv, "OUTPUT", str(output))
     monkeypatch.setattr(rmv, "YT_UPLOADS", str(output / "youtube-uploads.json"))
+    monkeypatch.setattr(rmv, "YT_UPLOADS_NEW", str(output / "youtube-calciovich-uploads.json"))
     monkeypatch.setattr(rmv, "STORICO", str(output / "metriche-video-storico.json"))
+    monkeypatch.setattr(rmv, "STORICO_NEW", str(output / "metriche-video-storico-calciovich.json"))
     monkeypatch.setattr(metriche_video, "APP_DATA", str(app_dir / "data.json"))
     return output
 
@@ -84,6 +86,7 @@ def test_build_plan_row_shape_and_categoria(repo):
     assert rows == [{
         "video_id": "vid1", "key": "short01-x.vert", "categoria": "canonical",
         "snapshot_at": snapshot_at, "views": 42, "likes": 3, "comments": 2,
+        "channel_key": "gol-impossibili",
     }]
 
 
@@ -173,5 +176,109 @@ def test_an_expired_token_degrades_cleanly_instead_of_crashing(repo, monkeypatch
 
 def test_a_working_token_returns_the_plan_unchanged(repo, monkeypatch):
     sentinel = ("t1", [{"video_id": "a"}])
-    monkeypatch.setattr(rmv, "build_plan", lambda: sentinel)
+    monkeypatch.setattr(rmv, "build_plan", lambda **kw: sentinel)
     assert rmv._build_plan_or_none() == sentinel
+
+
+# ---------------------------------------------------------------- one collection per channel (06/10/2026)
+
+def confirm_new(repo, key, video_id):
+    import upload_registry
+    reg = upload_registry.Registry(str(repo / "youtube-calciovich-uploads.json"))
+    reg.confirm(key, external_id=video_id, videoId=video_id)
+    reg.close()
+
+
+def source(name):
+    return next(s for s in rmv.sources() if s["profile"].key == name)
+
+
+def test_each_channel_reads_only_its_own_registry_and_labels_its_rows(repo):
+    confirm_in_registry(repo, "short01-x.vert", "vOLD")
+    confirm_new(repo, "short01-x.vert", "vNEW")                       # same content, republished
+    stats = {"vOLD": {"views": 5, "likes": 0, "comments": 0, "privacy": "public"},
+             "vNEW": {"views": 2, "likes": 0, "comments": 0, "privacy": "public"}}
+    _, old_rows = rmv.build_plan(stats_override=stats, source=source("gol-impossibili"))
+    _, new_rows = rmv.build_plan(stats_override=stats, source=source("calciovich"))
+    assert [(r["video_id"], r["channel_key"]) for r in old_rows] == [("vOLD", "gol-impossibili")]
+    assert [(r["video_id"], r["channel_key"]) for r in new_rows] == [("vNEW", "calciovich")]
+
+
+def test_a_scheduled_private_copy_on_the_new_channel_is_not_recorded_yet(repo):
+    confirm_new(repo, "short02-x.vert", "vSCHED")
+    stats = {"vSCHED": {"views": 0, "likes": 0, "comments": 0, "privacy": "private"}}
+    _, rows = rmv.build_plan(stats_override=stats, source=source("calciovich"))
+    assert rows == []
+
+
+def test_histories_are_written_to_separate_files(repo, monkeypatch):
+    confirm_in_registry(repo, "short01-x.vert", "vOLD")
+    confirm_new(repo, "short01-x.vert", "vNEW")
+    stats = {"vOLD": {"views": 5, "likes": 0, "comments": 0, "privacy": "public"},
+             "vNEW": {"views": 2, "likes": 0, "comments": 0, "privacy": "public"}}
+    real = rmv.build_plan
+    monkeypatch.setattr(rmv, "build_plan", lambda **kw: real(stats_override=stats, **kw))
+    monkeypatch.setattr(sys, "argv", ["raccogli_metriche_video.py"])
+    assert rmv.main() == 0
+    old = json.load(open(repo / "metriche-video-storico.json"))["records"]
+    new = json.load(open(repo / "metriche-video-storico-calciovich.json"))["records"]
+    assert {r["video_id"] for r in old} == {"vOLD"} and {r["video_id"] for r in new} == {"vNEW"}
+    assert {r["channel_key"] for r in old} == {"gol-impossibili"} and {r["channel_key"] for r in new} == {"calciovich"}
+
+
+def test_no_file_is_created_for_a_channel_with_nothing_public_yet(repo, monkeypatch):
+    confirm_in_registry(repo, "short01-x.vert", "vOLD")
+    stats = {"vOLD": {"views": 5, "likes": 0, "comments": 0, "privacy": "public"}}
+    real = rmv.build_plan
+    monkeypatch.setattr(rmv, "build_plan", lambda **kw: real(stats_override=stats, **kw))
+    monkeypatch.setattr(sys, "argv", ["raccogli_metriche_video.py"])
+    rmv.main()
+    assert not (repo / "metriche-video-storico-calciovich.json").exists()
+
+
+def test_one_channel_failing_does_not_stop_the_other_but_the_exit_code_says_so(repo, monkeypatch, capsys):
+    confirm_in_registry(repo, "short01-x.vert", "vOLD")
+    confirm_new(repo, "short01-x.vert", "vNEW")
+    stats = {"vOLD": {"views": 5, "likes": 0, "comments": 0, "privacy": "public"}}
+    real = rmv.build_plan
+
+    def flaky(**kw):
+        if kw["source"]["profile"].key == "calciovich":
+            raise rmv.ChannelMismatch("il token appartiene a ['UCaltro'], atteso UCnuovo")
+        return real(stats_override=stats, **kw)
+    monkeypatch.setattr(rmv, "build_plan", flaky)
+    monkeypatch.setattr(sys, "argv", ["raccogli_metriche_video.py"])
+    assert rmv.main() == 1
+    assert json.load(open(repo / "metriche-video-storico.json"))["records"][0]["video_id"] == "vOLD"
+    assert not (repo / "metriche-video-storico-calciovich.json").exists()
+    assert "nessuna riga scritta" in capsys.readouterr().out
+
+
+class FakeChannels:
+    def __init__(self, ids):
+        self.ids = ids
+
+    def list(self, **kw):
+        assert kw.get("mine") is True
+        return self
+
+    def execute(self):
+        return {"items": [{"id": i} for i in self.ids]}
+
+
+class FakeYT:
+    def __init__(self, ids):
+        self._c = FakeChannels(ids)
+
+    def channels(self):
+        return self._c
+
+
+def test_owner_guard_accepts_the_right_channel():
+    metriche_video.check_owner(FakeYT(["UCok"]), "UCok")
+
+
+@pytest.mark.parametrize("owned", [["UCaltro"], []])
+def test_owner_guard_refuses_a_token_of_another_channel_or_of_no_channel(owned):
+    with pytest.raises(metriche_video.ChannelMismatch):
+        metriche_video.check_owner(FakeYT(owned), "UCok")

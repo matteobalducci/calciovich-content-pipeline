@@ -52,26 +52,33 @@ CREATE TABLE IF NOT EXISTS `calciovich-video-analytics.calciovich_content.dim_da
 -- TikTok hanno solo log di pubblicazione, zero engagement raccolto)
 -- --------------------------------------------------------------------------
 
--- Grain (video_id, snapshot_at) — staging 1:1 dal JSON sorgente, NESSUNA
--- aggregazione a monte. Un'eventuale dedup "un valore per bucket temporale" per un
--- mart Looker si fa qui sotto, a livello di vista, non nello staging.
+-- Grain (channel_key, video_id, snapshot_at) — staging 1:1 dai JSON sorgente (uno per canale), NESSUNA
+-- aggregazione a monte. Un'eventuale dedup "un valore per bucket temporale" per un mart Looker si fa a
+-- livello di vista, non nello staging. Scritta in APPEND da due processi (il Mac e GitHub Actions) e il
+-- progetto e' senza DML: i doppioni li elimina la vista v_engagement_canonico. Le righe storiche scritte prima dello
+-- split hanno channel_key NULL = canale originale. MIGRAZIONE ESEGUITA (06/10/2026): `ALTER TABLE ... ADD COLUMN`,
+-- NON un `CREATE TABLE ... AS SELECT` (un CTAS semplice rende NULLABLE le colonne REQUIRED, come snapshot_at, e
+-- crea una finestra in cui una scrittura concorrente puo' andare persa). Vedi sql/ddl/migration-2026-10-06-channel-key.sql.
 CREATE TABLE IF NOT EXISTS `calciovich-video-analytics.calciovich_content.fct_youtube_engagement_snapshot` (
   video_id    STRING,
   content_key STRING,
   snapshot_at TIMESTAMP NOT NULL,
   views       INT64,
   likes       INT64,
-  comments    INT64
+  comments    INT64,
+  channel_key STRING   -- gol-impossibili | calciovich
 );
 
--- Grain (video_id). views_dayN, non views_24h: l'API bucket per giorno solare, non
+-- Grain (channel_key, video_id). Le finestre vengono da YouTube Analytics: oggi solo per il canale originale.
+-- views_dayN, non views_24h: l'API bucket per giorno solare, non
 -- per ore esatte dalla pubblicazione (verificato empiricamente in Fase 2).
 CREATE TABLE IF NOT EXISTS `calciovich-video-analytics.calciovich_content.fct_youtube_fixed_window` (
   video_id    STRING NOT NULL,
   content_key STRING,
   views_day1  INT64,
   views_day2  INT64,
-  views_day7  INT64
+  views_day7  INT64,
+  channel_key STRING
 );
 
 -- Grain (content_key, platform, channel_key). Dallo split dei canali (06/10/2026) YouTube ha due

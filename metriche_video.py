@@ -117,7 +117,21 @@ def categoria(key, app_map):
     return "altro"
 
 
-def fetch_stats(video_ids, stats_override=None, token_path=None, scopes=None):
+class ChannelMismatch(Exception):
+    """Il token usato non appartiene al canale atteso: non si raccoglie nulla."""
+
+
+def check_owner(yt, expected_channel_id):
+    """Guardia anti-canale-sbagliato per i LETTORI. Le statistiche di un video pubblico sono leggibili con
+    qualunque token, quindi un token del canale sbagliato non darebbe errore: scriverebbe righe
+    etichettate col canale sbagliato. channels.list(mine=True) dice a quale canale appartiene davvero il token."""
+    resp = yt.channels().list(part="id", mine=True).execute()
+    owned = [it.get("id") for it in resp.get("items", [])]
+    if expected_channel_id not in owned:
+        raise ChannelMismatch(f"il token appartiene a {owned or 'nessun canale'}, atteso {expected_channel_id}")
+
+
+def fetch_stats(video_ids, stats_override=None, token_path=None, scopes=None, expect_channel_id=None):
     """Ritorna {video_id: {"views", "likes", "comments", "privacy"}}.
 
     stats_override e' iniettabile per i test di caratterizzazione: se passato, viene
@@ -128,9 +142,12 @@ def fetch_stats(video_ids, stats_override=None, token_path=None, scopes=None):
     "likes"/"comments" servono a raccogli_metriche_video.py, gia' presenti nella stessa
     risposta API (part="statistics,status") ma finora non estratti.
 
-    token_path/scopes: default = il token condiviso con carica_youtube.py
-    (comportamento di sempre per i chiamanti locali). Solo raccogli_snapshot_cloud.py
-    li passa, per usare il token a sola lettura invece di quello con scope upload."""
+    token_path: default = il token del canale originale (comportamento di sempre). scopes: se None si usano
+    gli scope REGISTRATI nel token (non una lista fissa): un lettore non deve pretendere scope che il token
+    non ha ne', soprattutto, riscrivere il file del token con scope piu' stretti (e' lo stesso file che usa
+    il publisher). Il cloud passa esplicitamente il suo token a sola lettura.
+    expect_channel_id: se dato, prima di leggere si verifica che il token appartenga a quel canale
+    (check_owner): senza, un token sbagliato produrrebbe righe etichettate col canale sbagliato."""
     if stats_override is not None:
         return stats_override
 
@@ -139,15 +156,16 @@ def fetch_stats(video_ids, stats_override=None, token_path=None, scopes=None):
     import googleapiclient.discovery
 
     token_path = token_path or TOKEN_PATH
-    scopes = scopes or ["https://www.googleapis.com/auth/youtube.upload",
-                        "https://www.googleapis.com/auth/youtube.readonly"]
     if not os.path.exists(token_path):
         sys.exit(f"Manca {token_path} — non posso leggere le statistiche.")
-    creds = Credentials.from_authorized_user_file(token_path, scopes)
+    creds = (Credentials.from_authorized_user_file(token_path, scopes) if scopes
+             else Credentials.from_authorized_user_file(token_path))
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
         open(token_path, "w").write(creds.to_json())
     yt = googleapiclient.discovery.build("youtube", "v3", credentials=creds)
+    if expect_channel_id:
+        check_owner(yt, expect_channel_id)
 
     out = {}
     for i in range(0, len(video_ids), 50):

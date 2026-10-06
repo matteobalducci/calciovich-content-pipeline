@@ -3,14 +3,39 @@
 -- sempre fresche, costo trascurabile — vedi carica_bigquery.py per il perché.
 
 -- --------------------------------------------------------------------------
+-- v_engagement_canonico — UNA riga per (canale, video, snapshot_at). fct_youtube_engagement_snapshot e'
+-- scritta in append da due processi indipendenti (il Mac e GitHub Actions): se partono insieme possono
+-- scrivere la stessa riga due volte. Il progetto BigQuery e' senza DML (livello gratuito: niente
+-- MERGE/UPDATE/DELETE), quindi i doppioni non si possono impedire ne' cancellare in scrittura: li elimina
+-- questa vista, da cui leggono TUTTI i mart. `channel_key` NULL (righe storiche scritte prima dello split) =
+-- canale originale.
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.v_engagement_canonico` AS
+SELECT
+  video_id,
+  content_key,
+  snapshot_at,
+  views,
+  likes,
+  comments,
+  COALESCE(channel_key, 'gol-impossibili') AS channel_key
+FROM `calciovich-video-analytics.calciovich_content.fct_youtube_engagement_snapshot`
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY COALESCE(channel_key, 'gol-impossibili'), video_id, snapshot_at
+  ORDER BY views DESC NULLS LAST, likes DESC NULLS LAST, comments DESC NULLS LAST
+) = 1;
+
+-- --------------------------------------------------------------------------
 -- mart_daily_engagement — un valore per (content_key, giorno), non uno per ogni
 -- trigger del collector. fct_youtube_engagement_snapshot resta a grain
--- (video_id, snapshot_at) nello staging deliberatamente (vedi sql/ddl/staging.sql):
+-- (canale, video_id, snapshot_at) nello staging deliberatamente (vedi sql/ddl/staging.sql):
 -- i cluster di snapshot ravvicinati osservati in sviluppo (riavvii del LaunchAgent,
 -- non un regime stazionario a 6h) sono artefatti, non segnale — questa vista li
 -- collassa prendendo il valore più alto del giorno (le view sono monotone non
 -- decrescenti nel tempo per un dato video, quindi il massimo del giorno è anche
 -- l'ultimo osservato).
+-- QUESTA VISTA E' DEL SOLO CANALE ORIGINALE (e' quella che il report Looker gia' pubblicato legge, a colonne
+-- invariate): per il canale del libro e per il confronto fra canali vedi mart_daily_engagement_by_channel.
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_daily_engagement` AS
 SELECT
@@ -21,9 +46,10 @@ SELECT
   MAX(e.views) AS views,
   MAX(e.likes) AS likes,
   MAX(e.comments) AS comments
-FROM `calciovich-video-analytics.calciovich_content.fct_youtube_engagement_snapshot` e
+FROM `calciovich-video-analytics.calciovich_content.v_engagement_canonico` e
 LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_content` d
   ON d.content_key = e.content_key
+WHERE e.channel_key = 'gol-impossibili'
 GROUP BY e.video_id, e.content_key, d.titolo, day;
 
 -- --------------------------------------------------------------------------
@@ -31,13 +57,21 @@ GROUP BY e.video_id, e.content_key, d.titolo, day;
 -- le finestre fisse (Fase 2, dove disponibili) e la categoria. YouTube-only,
 -- dichiarato dal nome stesso delle colonne (nessun "platform" generico che
 -- implicherebbe dati anche per Instagram/TikTok, che qui non esistono).
+-- DEL SOLO CANALE ORIGINALE (stesso motivo di mart_daily_engagement): un contenuto ripubblicato sul canale
+-- del libro avrebbe due video_id e il join per content_key lo raddoppierebbe. Il filtro sta DENTRO le CTE,
+-- prima del join. Per entrambi i canali: mart_video_performance_by_channel.
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_video_performance` AS
 WITH ultimo_snapshot AS (
   SELECT
     video_id, content_key, views, likes, comments, snapshot_at,
     ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY snapshot_at DESC) AS rn
-  FROM `calciovich-video-analytics.calciovich_content.fct_youtube_engagement_snapshot`
+  FROM `calciovich-video-analytics.calciovich_content.v_engagement_canonico`
+  WHERE channel_key = 'gol-impossibili'
+),
+finestre_originale AS (
+  SELECT * FROM `calciovich-video-analytics.calciovich_content.fct_youtube_fixed_window`
+  WHERE COALESCE(channel_key, 'gol-impossibili') = 'gol-impossibili'
 )
 SELECT
   d.content_key,
@@ -53,7 +87,7 @@ SELECT
   w.views_day7
 FROM `calciovich-video-analytics.calciovich_content.dim_content` d
 LEFT JOIN ultimo_snapshot s ON s.content_key = d.content_key AND s.rn = 1
-LEFT JOIN `calciovich-video-analytics.calciovich_content.fct_youtube_fixed_window` w
+LEFT JOIN finestre_originale w
   ON w.content_key = d.content_key;
 
 -- --------------------------------------------------------------------------
@@ -163,3 +197,59 @@ SELECT
 FROM `calciovich-video-analytics.calciovich_content.dim_content_lineage` l
 LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_content` d
   ON d.content_key = l.content_key;
+
+-- --------------------------------------------------------------------------
+-- mart_daily_engagement_by_channel — come mart_daily_engagement, ma per ENTRAMBI i canali, a grain
+-- (channel_key, video_id, giorno). Un contenuto ripubblicato ha due righe (video originale e copia), mai
+-- sommate. I video resi privati smettono di ricevere snapshot (il collector raccoglie solo i pubblici): la loro
+-- serie si ferma all'ultimo valore, non e' un calo.
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_daily_engagement_by_channel` AS
+SELECT
+  e.channel_key,
+  c.channel_name,
+  e.video_id,
+  e.content_key,
+  d.titolo,
+  DATE(e.snapshot_at) AS day,
+  MAX(e.views) AS views,
+  MAX(e.likes) AS likes,
+  MAX(e.comments) AS comments
+FROM `calciovich-video-analytics.calciovich_content.v_engagement_canonico` e
+LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_content` d ON d.content_key = e.content_key
+LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_channel` c ON c.channel_key = e.channel_key
+GROUP BY e.channel_key, c.channel_name, e.video_id, e.content_key, d.titolo, day;
+
+-- --------------------------------------------------------------------------
+-- mart_video_performance_by_channel — una riga per (canale, video_id) con l'ultimo snapshot noto. Le finestre
+-- fisse (YouTube Analytics) esistono solo per il canale originale: per il canale del libro restano NULL finche'
+-- non c'e' il consenso `yt-analytics.readonly` sul suo progetto. Il join con le finestre e' per (video_id,
+-- canale), non per content_key.
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_video_performance_by_channel` AS
+WITH ultimo_snapshot AS (
+  SELECT
+    channel_key, video_id, content_key, views, likes, comments, snapshot_at,
+    ROW_NUMBER() OVER (PARTITION BY channel_key, video_id ORDER BY snapshot_at DESC) AS rn
+  FROM `calciovich-video-analytics.calciovich_content.v_engagement_canonico`
+)
+SELECT
+  s.channel_key,
+  c.channel_name,
+  d.content_key,
+  d.titolo,
+  d.categoria,
+  s.video_id,
+  s.views          AS youtube_views_ultimo_snapshot,
+  s.likes          AS youtube_likes_ultimo_snapshot,
+  s.comments       AS youtube_comments_ultimo_snapshot,
+  s.snapshot_at    AS youtube_ultimo_snapshot_at,
+  w.views_day1,
+  w.views_day2,
+  w.views_day7
+FROM ultimo_snapshot s
+LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_content` d ON d.content_key = s.content_key
+LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_channel` c ON c.channel_key = s.channel_key
+LEFT JOIN `calciovich-video-analytics.calciovich_content.fct_youtube_fixed_window` w
+  ON w.video_id = s.video_id AND COALESCE(w.channel_key, 'gol-impossibili') = s.channel_key
+WHERE s.rn = 1;

@@ -223,38 +223,22 @@ def test_engagement_snapshot_is_staging_1_to_1_no_filtering():
                 "views": 10, "likes": 1, "comments": 0}]
     rows = dm.build_fct_youtube_engagement_snapshot(records)
     assert rows == [{"video_id": "v1", "content_key": "short01.vert",
-                      "snapshot_at": "2026-09-08T21:33:51", "views": 10, "likes": 1, "comments": 0}]
+                      "snapshot_at": "2026-09-08T21:33:51", "views": 10, "likes": 1, "comments": 0,
+                      "channel_key": "gol-impossibili"}]
 
 
-def test_filter_new_engagement_rows_keeps_only_strictly_newer():
-    rows = [
-        {"video_id": "v1", "snapshot_at": "2026-09-29T18:08:53", "views": 10},
-        {"video_id": "v2", "snapshot_at": "2026-09-30T00:00:00", "views": 20},
-        {"video_id": "v3", "snapshot_at": "2026-09-30T06:00:00", "views": 30},
-    ]
-    kept = dm.filter_new_engagement_rows(rows, after_snapshot_at="2026-09-30T00:00:00")
-    assert [r["video_id"] for r in kept] == ["v3"]
 
 
-def test_filter_new_engagement_rows_none_cutoff_keeps_everything():
-    rows = [{"video_id": "v1", "snapshot_at": "2026-09-08T21:33:51", "views": 10}]
-    assert dm.filter_new_engagement_rows(rows, after_snapshot_at=None) == rows
 
 
-def test_filter_new_engagement_rows_empty_remote_cutoff_matches_nothing_extra():
-    """Caso del migration day: storico locale e BigQuery hanno esattamente lo stesso
-    ultimo snapshot_at -> zero righe nuove, nessuna duplicazione al primo run con la
-    scrittura incrementale."""
-    rows = [{"video_id": "v1", "snapshot_at": "2026-09-29T18:08:53", "views": 10}]
-    kept = dm.filter_new_engagement_rows(rows, after_snapshot_at="2026-09-29T18:08:53")
-    assert kept == []
 
 
 def test_fixed_window_reads_the_dict_of_records_by_video_id():
     records = {"v1": {"video_id": "v1", "key": "short01.vert", "views_day7": 100}}
     rows = dm.build_fct_youtube_fixed_window(records)
     assert rows == [{"video_id": "v1", "content_key": "short01.vert",
-                      "views_day1": None, "views_day2": None, "views_day7": 100}]
+                      "views_day1": None, "views_day2": None, "views_day7": 100,
+                      "channel_key": "gol-impossibili"}]
 
 
 # --- build_fct_publish_event(): mappa id + scope ----------------------------
@@ -342,3 +326,85 @@ def test_dim_channel_declares_both_channels_and_takes_the_ids_from_the_caller():
     rows = dm.build_dim_channel({"calciovich": "UCnew"})
     assert {c["channel_key"] for c in rows} == {"gol-impossibili", "calciovich"}
     assert {c["channel_key"]: c["youtube_channel_id"] for c in rows} == {"calciovich": "UCnew", "gol-impossibili": None}
+
+
+# ---------------------------------------------------------------- engagement per canale (D)
+
+def test_legacy_engagement_rows_without_channel_belong_to_the_original_channel():
+    rows = dm.build_fct_youtube_engagement_snapshot([{"video_id": "v", "key": "k", "snapshot_at": "t"}])
+    assert rows[0]["channel_key"] == "gol-impossibili"
+
+
+def test_new_channel_rows_keep_their_channel():
+    rows = dm.build_fct_youtube_engagement_snapshot([{"video_id": "v", "key": "k", "snapshot_at": "t",
+                                                      "channel_key": "calciovich"}])
+    assert rows[0]["channel_key"] == "calciovich"
+
+
+def test_an_unknown_channel_in_the_history_is_an_error_not_a_default():
+    with pytest.raises(ValueError):
+        dm.build_fct_youtube_engagement_snapshot([{"video_id": "v", "key": "k", "snapshot_at": "t",
+                                                   "channel_key": "altro"}])
+
+
+
+
+
+
+
+
+def test_fixed_window_rows_carry_the_channel_that_produced_them():
+    rows = dm.build_fct_youtube_fixed_window({"v": {"video_id": "v", "key": "k"}}, channel_key="gol-impossibili")
+    assert rows[0]["channel_key"] == "gol-impossibili"
+
+
+# ---------------------------------------------------------------- idempotence by exact key (audit round 2)
+
+def row(video, ts, channel=None):
+    r = {"video_id": video, "snapshot_at": ts, "views": 1}
+    if channel:
+        r["channel_key"] = channel
+    return r
+
+
+def test_a_row_already_remote_is_not_written_again():
+    existing = {("gol-impossibili", "v1", "2026-10-06T10:00:00")}
+    kept = dm.filter_new_engagement_rows([row("v1", "2026-10-06T10:00:00"), row("v2", "2026-10-06T10:00:00")], existing)
+    assert [r["video_id"] for r in kept] == ["v2"]
+
+
+def test_the_mac_row_of_10_00_is_still_written_when_the_cloud_already_wrote_12_00():
+    """The bug the old MAX(snapshot_at) limit had: a valid 10:00 row was dropped because 12:00 already existed."""
+    existing = {("gol-impossibili", "v1", "2026-10-06T12:00:00")}
+    kept = dm.filter_new_engagement_rows([row("v1", "2026-10-06T10:00:00")], existing)
+    assert [r["snapshot_at"] for r in kept] == ["2026-10-06T10:00:00"]
+
+
+def test_the_same_video_and_instant_on_two_channels_are_different_keys():
+    existing = {("gol-impossibili", "v1", "2026-10-06T10:00:00")}
+    kept = dm.filter_new_engagement_rows([row("v1", "2026-10-06T10:00:00", "calciovich")], existing)
+    assert len(kept) == 1
+
+
+def test_legacy_rows_without_a_channel_match_the_original_channels_remote_keys():
+    existing = {("gol-impossibili", "v1", "2026-10-06T10:00:00")}
+    assert dm.filter_new_engagement_rows([row("v1", "2026-10-06T10:00:00")], existing) == []
+
+
+def test_without_remote_keys_everything_is_new():
+    rows = [row("v1", "2026-10-06T10:00:00"), row("v2", "2026-10-06T10:00:00")]
+    assert [r["video_id"] for r in dm.filter_new_engagement_rows(rows, None)] == ["v1", "v2"]
+
+
+@pytest.mark.parametrize("bad", [{"video_id": "v", "snapshot_at": None}, {"video_id": "v"},
+                                 {"snapshot_at": "2026-10-06T10:00:00"}, {"video_id": "", "snapshot_at": "t"}])
+def test_a_malformed_history_row_is_an_error_not_a_silent_drop(bad):
+    with pytest.raises(ValueError):
+        dm.build_fct_youtube_engagement_snapshot([bad])
+
+
+def test_the_repeated_hour_of_the_autumn_clock_change_does_not_drop_a_real_collection():
+    """25/10/2026 02:30 happens twice. A limit-based filter would drop the second one; keys do not."""
+    existing = {("gol-impossibili", "v1", "2026-10-25T02:50:00")}
+    kept = dm.filter_new_engagement_rows([row("v1", "2026-10-25T02:10:00")], existing)
+    assert len(kept) == 1
