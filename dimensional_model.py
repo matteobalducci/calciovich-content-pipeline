@@ -28,6 +28,24 @@ from metriche_video import categoria as _categoria, _app_data_categoria_map
 
 ID_FIELD_BY_PLATFORM = {"youtube": "videoId", "instagram": "mediaId", "tiktok": "publishId"}
 
+# Da dove viene ogni registro grezzo -> (piattaforma, canale). Dallo split dei canali (06/10/2026) YouTube ha due
+# registri: "youtube" e' quello del canale ORIGINALE (oggi Gol Impossibili: nome file e chiave storici invariati),
+# "youtube-calciovich" e' quello del canale del libro. Instagram e TikTok hanno un solo account ciascuno, del brand
+# Calciovich: per loro `channel_key` indica l'account, non un canale YouTube.
+SOURCES = {
+    "youtube": ("youtube", "gol-impossibili"),
+    "youtube-calciovich": ("youtube", "calciovich"),
+    "instagram": ("instagram", "calciovich"),
+    "tiktok": ("tiktok", "calciovich"),
+}
+LEGACY_CHANNEL = "gol-impossibili"
+CHANNELS = [
+    {"channel_key": "gol-impossibili", "channel_name": "Gol Impossibili",
+     "role": "clip AI, percorso Programma Partner (canale originale)"},
+    {"channel_key": "calciovich", "channel_name": "La Vera Storia di Calciovich",
+     "role": "storia e libro (dal 06/10/2026)"},
+]
+
 
 def _content_key(file_path):
     """Stessa derivazione di _app_data_categoria_map(): basename senza l'ultima
@@ -206,9 +224,9 @@ def build_fct_youtube_fixed_window(finestre_records):
     } for rec in finestre_records.values()]
 
 
-def build_fct_publish_event(registry_data_by_platform, valid_content_keys):
-    """registry_data_by_platform: {"youtube": {key: record}, "instagram": {...},
-    "tiktok": {...}} — gia' filtrato a CONFIRMED dal chiamante (vedi
+def build_fct_publish_event(registry_data_by_source, valid_content_keys):
+    """registry_data_by_source: {"youtube": {key: record}, "youtube-calciovich": {...}, "instagram": {...},
+    "tiktok": {...}} (chiavi = SOURCES) — gia' filtrato a CONFIRMED dal chiamante (vedi
     metriche_video.load_confirmed_uploads()/load_confirmed_youtube_uploads()).
 
     Un record la cui key non e' in valid_content_keys (dim_content) e' escluso
@@ -216,14 +234,23 @@ def build_fct_publish_event(registry_data_by_platform, valid_content_keys):
     calendario video) e le eventuali Stories, mai in modo silenzioso: il conteggio
     delle righe escluse va sempre loggato dal chiamante.
 
+    GRAIN: (content_key, platform, channel_key). Un contenuto ripubblicato sul canale nuovo ha DUE righe
+    YouTube (una per canale): le viste che contano "su quali piattaforme e'" devono prima ridurre a una riga
+    per (contenuto, piattaforma) — vedi sql/mart/views.sql.
+
     CONFIRMED non significa "visibile pubblicamente ora", significa "la piattaforma
     ha accettato l'upload" — privacy resta grezzo (mai un booleano is_public
     derivato), riflette lo stato al momento del confirm(), non lo stato live.
+    `confirmed_at` e' spesso NULL nei record storici; `scheduled_publish_at` e' il publishAt dell'upload
+    programmato (NULL se pubblicato subito).
 
     Ritorna (righe, conteggio_escluse)."""
     rows = []
     excluded = 0
-    for platform, records in registry_data_by_platform.items():
+    for source, records in registry_data_by_source.items():
+        if source not in SOURCES:
+            raise ValueError(f"registro sconosciuto '{source}': aggiungilo a SOURCES prima di caricarlo")
+        platform, channel_key = SOURCES[source]
         id_field = ID_FIELD_BY_PLATFORM[platform]
         for key, record in records.items():
             if key not in valid_content_keys:
@@ -232,8 +259,41 @@ def build_fct_publish_event(registry_data_by_platform, valid_content_keys):
             rows.append({
                 "content_key": key,
                 "platform": platform,
+                "channel_key": channel_key,
                 "external_id": record.get(id_field) or record.get("external_id"),
                 "privacy": record.get("privacy"),
                 "confirmed_at": record.get("confirmedAt"),
+                "scheduled_publish_at": record.get("publishAt"),
             })
     return rows, excluded
+
+
+def build_dim_channel(youtube_channel_ids=None):
+    """youtube_channel_ids: {channel_key: id}, fornito dal chiamante (non scritto qui: gli ID dei canali stanno
+    in un solo posto del progetto)."""
+    ids = youtube_channel_ids or {}
+    return [{**c, "youtube_channel_id": ids.get(c["channel_key"])} for c in CHANNELS]
+
+
+def build_dim_content_lineage(new_channel_records, original_channel_records, valid_content_keys):
+    """Per ogni contenuto ripubblicato sul canale nuovo: video originale -> copia. E' cio' che permette di
+    confrontare lo STESSO contenuto davanti a due pubblici (clip AI vs libro) senza sommarlo due volte.
+
+    new_channel_records: record CONFERMATI del registro del canale nuovo; original_channel_records: del canale
+    originale. Una ripubblicazione ha `republish_of` = chiave del contenuto originale. Un record senza
+    originale trovato produce comunque la riga (original_video_id NULL): meglio un buco visibile che sparire."""
+    rows = []
+    for key, rec in new_channel_records.items():
+        origin = rec.get("republish_of")
+        if not origin or key not in valid_content_keys:
+            continue
+        orig = original_channel_records.get(origin) or {}
+        rows.append({
+            "content_key": key,
+            "original_video_id": orig.get("videoId") or orig.get("external_id"),
+            "copy_video_id": rec.get("videoId") or rec.get("external_id"),
+            "scheduled_publish_at": rec.get("publishAt"),
+            "copy_confirmed_at": rec.get("confirmedAt"),
+            "reason": rec.get("republish_motivo"),
+        })
+    return rows

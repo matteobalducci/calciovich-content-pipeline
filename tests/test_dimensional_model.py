@@ -16,6 +16,8 @@ piattaforma-specifico.
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dimensional_model as dm  # noqa: E402
@@ -294,3 +296,49 @@ def test_privacy_is_carried_raw_never_derived_to_a_boolean():
     rows, _ = dm.build_fct_publish_event(registry_data, {"short01.vert"})
     assert rows[0]["privacy"] == "SELF_ONLY"
     assert "is_public" not in rows[0]
+
+
+# ---------------------------------------------------------------- two YouTube channels (06/10/2026)
+
+def test_publish_event_has_one_row_per_content_platform_and_channel():
+    rows, excluded = dm.build_fct_publish_event({
+        "youtube": {"k": {"videoId": "old", "confirmedAt": None}},
+        "youtube-calciovich": {"k": {"videoId": "new", "confirmedAt": "2026-10-07T10:30:00Z",
+                                     "publishAt": "2026-10-07T10:30:00Z", "privacy": "private"}},
+    }, {"k"})
+    assert excluded == 0
+    assert sorted((r["platform"], r["channel_key"], r["external_id"]) for r in rows) == [
+        ("youtube", "calciovich", "new"), ("youtube", "gol-impossibili", "old")]
+    new = next(r for r in rows if r["channel_key"] == "calciovich")
+    assert new["scheduled_publish_at"] == "2026-10-07T10:30:00Z" and new["privacy"] == "private"
+
+
+def test_instagram_and_tiktok_belong_to_the_calciovich_account():
+    rows, _ = dm.build_fct_publish_event({"instagram": {"k": {"mediaId": "m"}},
+                                          "tiktok": {"k": {"publishId": "p"}}}, {"k"})
+    assert {(r["platform"], r["channel_key"]) for r in rows} == {("instagram", "calciovich"), ("tiktok", "calciovich")}
+
+
+def test_an_unknown_registry_is_refused_not_silently_dropped():
+    with pytest.raises(ValueError):
+        dm.build_fct_publish_event({"youtube-altro": {"k": {"videoId": "x"}}}, {"k"})
+
+
+def test_lineage_links_original_and_copy_and_ignores_new_content():
+    rows = dm.build_dim_content_lineage(
+        {"a": {"videoId": "new1", "republish_of": "a", "republish_motivo": "m", "publishAt": "t", "confirmedAt": "c"},
+         "b": {"videoId": "new2"}},                                      # b was never published on the old channel
+        {"a": {"videoId": "old1"}}, {"a", "b"})
+    assert rows == [{"content_key": "a", "original_video_id": "old1", "copy_video_id": "new1",
+                     "scheduled_publish_at": "t", "copy_confirmed_at": "c", "reason": "m"}]
+
+
+def test_lineage_keeps_a_visible_gap_when_the_original_is_not_found():
+    rows = dm.build_dim_content_lineage({"a": {"videoId": "n", "republish_of": "a"}}, {}, {"a"})
+    assert rows[0]["original_video_id"] is None and rows[0]["copy_video_id"] == "n"
+
+
+def test_dim_channel_declares_both_channels_and_takes_the_ids_from_the_caller():
+    rows = dm.build_dim_channel({"calciovich": "UCnew"})
+    assert {c["channel_key"] for c in rows} == {"gol-impossibili", "calciovich"}
+    assert {c["channel_key"]: c["youtube_channel_id"] for c in rows} == {"calciovich": "UCnew", "gol-impossibili": None}

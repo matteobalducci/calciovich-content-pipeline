@@ -31,6 +31,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setattr(cb, "STORICO", str(output / "metriche-video-storico.json"))
     monkeypatch.setattr(cb, "FINESTRE", str(output / "metriche-finestre-fisse.json"))
     monkeypatch.setattr(cb, "YT_UPLOADS", str(output / "youtube-uploads.json"))
+    monkeypatch.setattr(cb, "YT_UPLOADS_NEW", str(output / "youtube-calciovich-uploads.json"))
     monkeypatch.setattr(cb, "IG_UPLOADS", str(output / "instagram-uploads.json"))
     monkeypatch.setattr(cb, "TK_UPLOADS", str(output / "tiktok-uploads.json"))
     return output, app_dir
@@ -128,3 +129,41 @@ def test_build_all_produces_no_side_effects_when_run_twice(repo):
     tables2, stats2 = cb.build_all()
     assert tables1["dim_content"] == tables2["dim_content"]
     assert stats1 == stats2
+
+
+def test_build_all_reads_both_youtube_channels_and_tags_every_row_with_its_channel(repo):
+    output, app_dir = repo
+    write_app_data(app_dir, item("/output/short01.mp4"), item("/output/short02.mp4"))
+    confirm_in_registry(output, "youtube-uploads.json", "short01", "videoId", "vidOLD")
+    confirm_in_registry(output, "youtube-calciovich-uploads.json", "short01", "videoId", "vidNEW",
+                         republish_of="short01", republish_motivo="calendario", publishAt="2026-10-07T10:30:00Z")
+    confirm_in_registry(output, "youtube-calciovich-uploads.json", "short02", "videoId", "vidONLYNEW")
+    confirm_in_registry(output, "instagram-uploads.json", "short01", "mediaId", "medI")
+    tables, stats = cb.build_all()
+    by = {(r["content_key"], r["platform"], r["channel_key"]): r for r in tables["fct_publish_event"]}
+    assert set(by) == {("short01", "youtube", "gol-impossibili"), ("short01", "youtube", "calciovich"),
+                       ("short02", "youtube", "calciovich"), ("short01", "instagram", "calciovich")}
+    assert by[("short01", "youtube", "calciovich")]["scheduled_publish_at"] == "2026-10-07T10:30:00Z"
+    assert by[("short01", "youtube", "calciovich")]["external_id"] == "vidNEW"
+    assert stats["excluded_publish_events"] == 0
+
+
+def test_build_all_exposes_the_lineage_original_to_copy(repo):
+    output, app_dir = repo
+    write_app_data(app_dir, item("/output/short01.mp4"), item("/output/short02.mp4"))
+    confirm_in_registry(output, "youtube-uploads.json", "short01", "videoId", "vidOLD")
+    confirm_in_registry(output, "youtube-calciovich-uploads.json", "short01", "videoId", "vidNEW",
+                         republish_of="short01", republish_motivo="calendario")
+    confirm_in_registry(output, "youtube-calciovich-uploads.json", "short02", "videoId", "vidONLYNEW")
+    tables, _ = cb.build_all()
+    assert tables["dim_content_lineage"] == [{
+        "content_key": "short01", "original_video_id": "vidOLD", "copy_video_id": "vidNEW",
+        "scheduled_publish_at": None, "copy_confirmed_at": tables["dim_content_lineage"][0]["copy_confirmed_at"],
+        "reason": "calendario"}]                                    # short02 is new, not a republication
+
+
+def test_build_all_declares_both_channels(repo):
+    output, app_dir = repo
+    write_app_data(app_dir)
+    tables, _ = cb.build_all()
+    assert {c["channel_key"] for c in tables["dim_channel"]} == {"gol-impossibili", "calciovich"}

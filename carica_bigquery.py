@@ -15,6 +15,13 @@ SCOPE ONESTO: le metriche di engagement esistono solo per YouTube — vedi
 dimensional_model.py per il perche' di tre fact table distinte invece di una sola
 con colonna "platform".
 
+DUE CANALI YOUTUBE (dal 06/10/2026): il canale originale (oggi "Gol Impossibili") e il canale del libro hanno
+registri separati. fct_publish_event ha grain (content_key, platform, channel_key); le viste di copertura
+passano da v_publish_event_canonico (una riga per contenuto e piattaforma, canale originale per primo) cosi'
+restano identiche a prima per i contenuti esistenti. Le statistiche di engagement (fct_youtube_*) restano del
+solo canale originale: raccogliere quelle del canale nuovo e' una fase successiva. Rollout fatto in 3 passi
+additivi (colonna, viste, righe): vedi ENGINEERING-LOG.md.
+
 SCRITTURA STAGING: WRITE_TRUNCATE per tabella, non MERGE. Ogni fonte locale (i JSON
 di Fase 1/2, upload_registry.Registry per le tre piattaforme) e' uno stato pieno e
 autoconsistente ad ogni lettura, non un log incrementale — verificato leggendo
@@ -31,7 +38,7 @@ Mac continua a vedere solo il proprio storico locale (output/metriche-video-stor
 mai sincronizzato con la cloud per scelta — vedi .gitignore), GitHub Actions scrive
 una sola riga fresca a ogni run senza vedere lo storico del Mac. Un WRITE_TRUNCATE
 da uno dei due cancellerebbe quello che l'altro ha scritto nel frattempo. Le altre
-cinque tabelle restano WRITE_TRUNCATE: solo il Mac le scrive (GitHub Actions non ha
+tabelle restano WRITE_TRUNCATE: solo il Mac le scrive (GitHub Actions non ha
 app/data.json, le upload-registry, ne' le finestre fisse — vedi il workflow), quindi
 non c'e' nessun secondo scrittore con cui andare in conflitto.
 
@@ -68,7 +75,9 @@ OUTPUT = os.path.join(HERE, "output")
 APP_DATA = os.path.join(HERE, "app", "data.json")
 STORICO = os.path.join(OUTPUT, "metriche-video-storico.json")
 FINESTRE = os.path.join(OUTPUT, "metriche-finestre-fisse.json")
-YT_UPLOADS = os.path.join(OUTPUT, "youtube-uploads.json")
+YT_UPLOADS = os.path.join(OUTPUT, "youtube-uploads.json")                   # canale ORIGINALE (oggi Gol Impossibili)
+YT_UPLOADS_NEW = os.path.join(OUTPUT, "youtube-calciovich-uploads.json")    # canale del libro (dal 06/10/2026)
+CHANNEL_IDS = {"gol-impossibili": "UCLPBYAv19aizEYX4MmXV7rA", "calciovich": "UCy1V7Lwaeb8_6iaSEzSOtPA"}
 IG_UPLOADS = os.path.join(OUTPUT, "instagram-uploads.json")
 TK_UPLOADS = os.path.join(OUTPUT, "tiktok-uploads.json")
 
@@ -91,12 +100,16 @@ def build_all():
     finestre = load(FINESTRE, {"records": {}})
     fixed_window_rows = dm.build_fct_youtube_fixed_window(finestre.get("records", {}))
 
+    yt_original = load_confirmed_youtube_uploads(YT_UPLOADS)
+    yt_new = load_confirmed_youtube_uploads(YT_UPLOADS_NEW)
     registry_data = {
-        "youtube": load_confirmed_youtube_uploads(YT_UPLOADS),
+        "youtube": yt_original,
+        "youtube-calciovich": yt_new,
         "instagram": load_confirmed_uploads(IG_UPLOADS, "mediaId"),
         "tiktok": load_confirmed_uploads(TK_UPLOADS, "publishId"),
     }
     publish_rows, excluded_publish = dm.build_fct_publish_event(registry_data, valid_keys)
+    lineage_rows = dm.build_dim_content_lineage(yt_new, yt_original, valid_keys)
 
     known_dates = {date.today()}
     for r in engagement_rows:
@@ -119,6 +132,8 @@ def build_all():
         "fct_youtube_engagement_snapshot": engagement_rows,
         "fct_youtube_fixed_window": fixed_window_rows,
         "fct_publish_event": publish_rows,
+        "dim_channel": dm.build_dim_channel(CHANNEL_IDS),
+        "dim_content_lineage": lineage_rows,
     }
     stats = {"dropped_content_dupes": dropped_dupes, "excluded_publish_events": excluded_publish}
     return tables, stats
@@ -163,6 +178,22 @@ def _schemas(bigquery):
             bigquery.SchemaField("external_id", "STRING"),
             bigquery.SchemaField("privacy", "STRING"),
             bigquery.SchemaField("confirmed_at", "TIMESTAMP"),
+            bigquery.SchemaField("channel_key", "STRING"),
+            bigquery.SchemaField("scheduled_publish_at", "TIMESTAMP"),
+        ],
+        "dim_channel": [
+            bigquery.SchemaField("channel_key", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("channel_name", "STRING"),
+            bigquery.SchemaField("youtube_channel_id", "STRING"),
+            bigquery.SchemaField("role", "STRING"),
+        ],
+        "dim_content_lineage": [
+            bigquery.SchemaField("content_key", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("original_video_id", "STRING"),
+            bigquery.SchemaField("copy_video_id", "STRING"),
+            bigquery.SchemaField("scheduled_publish_at", "TIMESTAMP"),
+            bigquery.SchemaField("copy_confirmed_at", "TIMESTAMP"),
+            bigquery.SchemaField("reason", "STRING"),
         ],
         "_run_metadata": [
             bigquery.SchemaField("run_id", "STRING", mode="REQUIRED"),
@@ -224,6 +255,8 @@ def main():
     print(f"dim_platform: {len(tables['dim_platform'])} righe")
     print(f"fct_youtube_engagement_snapshot: {len(tables['fct_youtube_engagement_snapshot'])} righe")
     print(f"fct_youtube_fixed_window: {len(tables['fct_youtube_fixed_window'])} righe")
+    print(f"dim_channel: {len(tables['dim_channel'])} righe")
+    print(f"dim_content_lineage: {len(tables['dim_content_lineage'])} righe")
     print(f"fct_publish_event: {len(tables['fct_publish_event'])} righe "
           f"({stats['excluded_publish_events']} escluse, fuori scope dim_content)")
 
@@ -246,7 +279,7 @@ def main():
     client = _bigquery_client(bigquery, service_account)
     schemas = _schemas(bigquery)
 
-    truncate_tables = ["dim_platform", "dim_date", "dim_content",
+    truncate_tables = ["dim_platform", "dim_date", "dim_content", "dim_channel", "dim_content_lineage",
                         "fct_youtube_fixed_window", "fct_publish_event"]
     written = []
     for name in truncate_tables:

@@ -292,6 +292,40 @@ PiAPI (Seedance/Seedream) · Google Gemini API (`google-genai`, image generation
 ElevenLabs (optional paid voice) · Pollinations · edge-tts · Pillow · ffmpeg (via
 imageio-ffmpeg)
 
+## Two YouTube channels (since 2026-10-06)
+
+One channel was carrying two audiences: 95.6% of the views came from 16 AI football clips and
+4.4% from 54 videos of the story the project is actually about. The channel was split in two —
+the original one keeps the clips, a new one carries the story and the book.
+
+In the private production publisher, every item is routed to its channel fail-closed (an item
+whose category and file path disagree is skipped with an error rather than guessed, a
+cross-channel duplicate needs an explicit one-key-at-a-time republication, a token that resolves
+to the wrong channel stops the upload). That routing, the channel configuration and the
+production registries are intentionally not in this repository. **What this repository contains
+is the analytics side of the split:** the warehouse model and the loader that had to learn
+about two destinations without breaking the report that was already published.
+
+What that did to the analytics layer, and how it was rolled out without taking the published
+report down:
+
+- **Grain.** `fct_publish_event` is now `(content_key, platform, channel_key)`. A republished
+  video has two YouTube rows, so the coverage views read a canonical one-row-per-content-and-
+  platform view (`v_publish_event_canonico`) and keep returning exactly what they returned before
+  for existing content; the full per-channel detail is in `mart_publish_reach_by_channel`, and the
+  original-to-copy link in `mart_republication_lineage`.
+- **Canonical, not "first".** Most historical `confirmed_at` values are NULL, so "earliest
+  publication" is not computable. The rule is stated for what it is — the original channel's row
+  wins — and tested on synthetic rows against live BigQuery, including a NULL original against a
+  timestamped copy.
+- **Order of rollout:** add the columns → replace the views → write the new rows, each step compared
+  to a snapshot of the views taken just before. The loader was paused while the schema changed.
+- **Scope, honestly:** engagement metrics (`fct_youtube_*`) still cover only the original channel.
+  Collecting the new channel's statistics is a later step, and it has a precondition: the
+  video-performance view joins on `content_key`, so a `channel_key` has to reach the engagement
+  facts first or a republished video would show up twice there. A video made private stops being
+  collected by design, so the last snapshot is frozen before each batch is hidden.
+
 ## Roadmap
 
 The pipeline's job is production and publishing. What it accumulates started out

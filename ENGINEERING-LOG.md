@@ -212,3 +212,39 @@ that window.
 
 **Files.** `carica_tiktok.py` (`--only` / `--all` / `--limit`, invoked by policy with a
 single item at a time).
+
+---
+
+### ENG-6: a second YouTube channel would have double-counted every republished video
+
+**Tag:** `DATA-MODEL`
+
+**Symptom.** None yet — found in review before any republished video reached the warehouse. The
+dashboard reads the coverage views by name; once the new channel's registry was read, a video
+published on both channels would have counted twice on YouTube (`COUNTIF` over a per-platform
+fact), and new content published only on the new channel would have been reported as "not on
+YouTube" while the registry was left unread.
+
+**Root cause.** `fct_publish_event` was keyed `(content_key, platform)`, an assumption that
+stopped being true the moment a platform could have two destinations.
+
+**Fix.** Grain widened to `(content_key, platform, channel_key)`; the views the report reads go
+through a canonical view that keeps one row per content and platform. The first version of that
+rule ordered by `confirmed_at`, which an independent review showed to be NULL in 144 of 172 live
+rows — the "earliest" row was effectively arbitrary. The rule now puts the original channel first
+and is documented as canonicality, not chronology. Rollout order was column, then views, then
+rows, because a loader on a schedule would otherwise have rewritten the table with the old schema
+under the new views.
+
+**Verification.** The rule runs on synthetic rows against live BigQuery (original with no timestamp
+vs timestamped copy; both without timestamp with the copy's id sorting first; copy older than
+original; content only on the new channel; other platforms untouched). After each rollout step the
+coverage views and the video-performance view were compared row-for-row with a snapshot taken just
+before (the daily-engagement view was not touched: its definition and source table are unchanged); the
+loader was then run twice more to check idempotence. Known residual risk: a stale checkout of the
+loader would rewrite `fct_publish_event` with the old five-column schema and the new views would
+fail at once — every scheduled job points at the updated tree, and the cloud snapshot job only appends
+engagement rows.
+
+**Files.** `dimensional_model.py` (`SOURCES`, `build_fct_publish_event`, `build_dim_content_lineage`),
+`carica_bigquery.py`, `sql/mart/views.sql`, `sql/ddl/staging.sql`, `tests/test_views_sql_bigquery.py`.

@@ -57,10 +57,32 @@ LEFT JOIN `calciovich-video-analytics.calciovich_content.fct_youtube_fixed_windo
   ON w.content_key = d.content_key;
 
 -- --------------------------------------------------------------------------
+-- v_publish_event_canonico — UNA riga per (contenuto, piattaforma). Dallo split dei canali
+-- (06/10/2026) un contenuto ripubblicato sul canale nuovo ha DUE righe YouTube in
+-- fct_publish_event (una per canale): le viste che rispondono a "su quali piattaforme e'
+-- questo contenuto" devono contarlo UNA volta, e restare identiche a prima per i contenuti
+-- gia' esistenti. La riga canonica e' quella del canale ORIGINALE (`gol-impossibili`), poi la
+-- piu' vecchia, poi per id. Non e' "la prima pubblicazione" in senso cronologico: confirmed_at e'
+-- NULL nella maggior parte dei record storici, quindi non si puo' ordinare per tempo. E' una
+-- regola di CANONICITA' dichiarata. Il dettaglio per canale sta in mart_publish_reach_by_channel.
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.v_publish_event_canonico` AS
+SELECT *
+FROM `calciovich-video-analytics.calciovich_content.fct_publish_event`
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY content_key, platform
+  ORDER BY IF(channel_key = 'gol-impossibili', 0, 1),
+           confirmed_at ASC NULLS LAST,
+           scheduled_publish_at ASC NULLS LAST,
+           external_id
+) = 1;
+
+-- --------------------------------------------------------------------------
 -- mart_publish_reach — per ogni contenuto del calendario, su quali piattaforme è
 -- CONFIRMED e con che privacy grezza. CONFIRMED non implica visibilità pubblica
 -- (vedi sql/ddl/staging.sql) — questa vista espone privacy così com'è, non deriva
--- un flag "pubblico".
+-- un flag "pubblico". Costruita su v_publish_event_canonico: stessi numeri di prima anche dopo
+-- le ripubblicazioni sul canale nuovo (su_youtube resta 0/1).
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_publish_reach` AS
 SELECT
@@ -72,7 +94,7 @@ SELECT
   COUNT(DISTINCT p.platform)        AS n_piattaforme,
   ARRAY_AGG(STRUCT(p.platform, p.privacy, p.confirmed_at) ORDER BY p.platform) AS dettaglio_piattaforme
 FROM `calciovich-video-analytics.calciovich_content.dim_content` d
-LEFT JOIN `calciovich-video-analytics.calciovich_content.fct_publish_event` p
+LEFT JOIN `calciovich-video-analytics.calciovich_content.v_publish_event_canonico` p
   ON p.content_key = d.content_key
 GROUP BY d.content_key, d.categoria;
 
@@ -84,7 +106,7 @@ GROUP BY d.content_key, d.categoria;
 -- nel report builder standard — dettaglio_piattaforme in mart_publish_reach
 -- resta corretto per un consumer SQL diretto, ma non e' collegabile a un
 -- grafico Looker Studio cosi' com'e'. Questa vista e' la fonte per la pagina
--- "copertura multi-piattaforma" del report.
+-- "copertura multi-piattaforma" del report. Anch'essa su v_publish_event_canonico.
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_publish_reach_detail` AS
 SELECT
@@ -95,5 +117,49 @@ SELECT
   p.privacy,
   p.confirmed_at
 FROM `calciovich-video-analytics.calciovich_content.dim_content` d
-JOIN `calciovich-video-analytics.calciovich_content.fct_publish_event` p
+JOIN `calciovich-video-analytics.calciovich_content.v_publish_event_canonico` p
   ON p.content_key = d.content_key;
+
+-- --------------------------------------------------------------------------
+-- mart_publish_reach_by_channel — il dettaglio COMPLETO per (contenuto, piattaforma, canale), senza
+-- ridurre: un contenuto ripubblicato sul canale nuovo compare due volte su YouTube. `privacy_alla_conferma`
+-- e' la privacy al momento dell'upload (un upload programmato e' 'private' anche dopo essere diventato
+-- pubblico), `scheduled_publish_at` e' il publishAt. Per Instagram/TikTok `channel_key` e' l'account del brand.
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_publish_reach_by_channel` AS
+SELECT
+  d.content_key,
+  d.titolo,
+  d.categoria,
+  p.platform,
+  p.channel_key,
+  c.channel_name,
+  p.privacy AS privacy_alla_conferma,
+  p.confirmed_at,
+  p.scheduled_publish_at
+FROM `calciovich-video-analytics.calciovich_content.dim_content` d
+JOIN `calciovich-video-analytics.calciovich_content.fct_publish_event` p
+  ON p.content_key = d.content_key
+LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_channel` c
+  ON c.channel_key = p.channel_key AND p.platform = 'youtube';   -- dim_channel descrive i canali YouTube: per
+                                                                  -- Instagram/TikTok channel_name resta NULL
+
+-- --------------------------------------------------------------------------
+-- mart_republication_lineage — i contenuti ripubblicati sul canale nuovo: video originale -> copia.
+-- Serve a confrontare lo STESSO contenuto davanti a due pubblici senza sommarlo due volte. Le statistiche
+-- di engagement del canale nuovo non sono ancora raccolte (fase successiva): oggi la vista dice cosa e'
+-- stato ripubblicato e quando, non come e' andato.
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_republication_lineage` AS
+SELECT
+  l.content_key,
+  d.titolo,
+  d.categoria,
+  l.original_video_id,
+  l.copy_video_id,
+  l.scheduled_publish_at,
+  l.copy_confirmed_at,
+  l.reason
+FROM `calciovich-video-analytics.calciovich_content.dim_content_lineage` l
+LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_content` d
+  ON d.content_key = l.content_key;
