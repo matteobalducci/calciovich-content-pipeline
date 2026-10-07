@@ -204,11 +204,10 @@ own anti-spam heuristic starts rejecting new posts from the same account.
 **Fix.** `carica_tiktok.py` already supports publishing a single named item via `--only`;
 the fix here is a rule in how the publisher is invoked, not a code change to it — never run
 it with more than one pending item, so the Inbox queue is only ever asked to grow by one
-before a human has a chance to clear it. The script's own default is `--limit 5`, so this
-is a convention held by the invoking side, not a limit the code enforces — and the
-dashboard's "retry all" action (`tiktok-retry-all` in `app_server.py`) runs `--all` without
-`--limit 1`, so the script's default of 5 applies: it is the one path that can still queue
-several posts at once.
+before a human has a chance to clear it. The script's own default is `--limit 5`, so the
+rule is held by the invoking side rather than enforced by the publisher; the one path that
+could still queue several posts, the dashboard's "retry all" action (`tiktok-retry-all` in
+`app_server.py`), now passes `--all --limit 1` and is covered by a test.
 
 **Verification.** After the rule was adopted, a full week of daily runs each published at
 most one TikTok item; no further `spam_risk_too_many_pending_share` rejection occurred in

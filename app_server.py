@@ -72,7 +72,10 @@ def _flow_ig(item_id):
 
 def _flow_tiktok(item_id):
     cmd = [sys.executable, "carica_tiktok.py"]
-    cmd += ["--only", item_id] if item_id else ["--all"]
+    # Senza un item preciso: uno solo per richiesta. Ogni post TikTok resta una bozza nella Inbox
+    # finche' una persona non la conferma; piu' post insieme superano quello smaltimento e fanno
+    # scattare spam_risk_too_many_pending_share (ENGINEERING-LOG ENG-5).
+    cmd += ["--only", item_id] if item_id else ["--all", "--limit", "1"]
     return cmd
 
 
