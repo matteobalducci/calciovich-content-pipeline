@@ -24,6 +24,8 @@ oggi, Gol Impossibili dopo il rebrand).
 """
 import os
 
+from youtube_analytics_auth import write_private
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENT_SECRET = os.path.join(HERE, "youtube_client_secret_readonly.json")
 TOKEN_PATH = os.path.join(HERE, "youtube_readonly_token.json")
@@ -37,9 +39,7 @@ def main():
           "calciovich-video-analytics)...")
     flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET, READONLY_SCOPES)
     creds = flow.run_local_server(port=0)
-    fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(creds.to_json())
+    write_private(TOKEN_PATH, creds.to_json())
     print(f"OK — token salvato in {TOKEN_PATH}")
 
 

@@ -104,9 +104,34 @@ def _notify_macos(text, title="Calciovich — controllo pipeline"):
     di stato_pipeline fanno spesso, es. citano id fra «»)."""
     script = 'on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"\nend run'
     try:
-        subprocess.run(["osascript", "-e", script, title, text], capture_output=True, timeout=10)
+        done = subprocess.run(["osascript", "-e", script, title, text], capture_output=True, timeout=10)
+        return done.returncode == 0
     except Exception:
-        pass  # una notifica persa non deve mai far cadere il watchdog
+        return False  # una notifica persa non deve mai far cadere il watchdog, ma non conta come inviata
+
+
+def _watchdog_step(active, last_notified, now, notify, renotify_hours=None):
+    """Decide quali flag notificare e ritorna il nuovo stato {chiave: ora dell'ultimo invio}.
+    Un flag entra nello stato solo se la notifica e' PARTITA (notify() -> True) o se e' ancora
+    dentro la finestra di silenzio: una notifica fallita viene ritentata al giro dopo invece di
+    restare muta per 12h. I flag non piu' attivi spariscono: se tornano, ripartono come nuovi."""
+    hours_limit = WATCHDOG_RENOTIFY_HOURS if renotify_hours is None else renotify_hours
+    new_state = {}
+    for key, flag in active.items():
+        text, level = flag["text"], flag.get("level", "warn")
+        prev_at = last_notified.get(key)
+        due = True
+        if prev_at:
+            try:
+                hours = (now - datetime.datetime.fromisoformat(prev_at)).total_seconds() / 3600
+                due = hours >= hours_limit
+            except ValueError:
+                due = True
+        if not due:
+            new_state[key] = prev_at
+        elif notify(f"{'⚠️' if level == 'warn' else '🛑'} {text}"):
+            new_state[key] = now.isoformat(timespec="seconds")
+    return new_state
 
 
 def _freshness_watchdog_loop():
@@ -133,27 +158,7 @@ def _freshness_watchdog_loop():
             except Exception:
                 last_notified = {}
 
-            now = datetime.datetime.now()
-            new_state = {}
-            for key, flag in active.items():
-                text, level = flag["text"], flag.get("level", "warn")
-                prev_at = last_notified.get(key)
-                due = True
-                if prev_at:
-                    try:
-                        hours = (now - datetime.datetime.fromisoformat(prev_at)).total_seconds() / 3600
-                        due = hours >= WATCHDOG_RENOTIFY_HOURS
-                    except ValueError:
-                        due = True
-                if due:
-                    prefix = "⚠️" if level == "warn" else "🛑"
-                    _notify_macos(f"{prefix} {text}")
-                    new_state[key] = now.isoformat(timespec="seconds")
-                else:
-                    new_state[key] = prev_at
-            # i flag non piu' attivi spariscono da new_state: se ricompaiono in
-            # futuro ripartono come nuovi, cosa corretta (e' di nuovo un problema
-            # fresco, non una ripetizione di uno gia' notificato).
+            new_state = _watchdog_step(active, last_notified, datetime.datetime.now(), _notify_macos)
 
             os.makedirs(os.path.dirname(WATCHDOG_STATE_PATH), exist_ok=True)
             with open(WATCHDOG_STATE_PATH, "w", encoding="utf-8") as fh:

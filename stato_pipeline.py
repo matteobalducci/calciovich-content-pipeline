@@ -317,11 +317,18 @@ def _publish_cadence_flags(now=None):
     return flags, (max(lasts) if lasts else None)
 
 
+# Numero non attaccato a una lettera/cifra precedente (\w e' Unicode-aware).
+_LOOSE_NUMBER_RE = re.compile(r"(?<!\w)[0-9]+")
+
+
 def flag_key(level, text):
     """Chiave stabile di un flag per il watchdog di app_server.py. I numeri nel testo
     ("da 31 ore", date) cambiano a ogni controllo: usarli nella chiave faceva sembrare
     'nuovo' lo stesso problema a ogni giro e rinotificava ogni ora invece che ogni 12h."""
-    return f"{level}|{re.sub(r'[0-9]+', '#', text)}"
+    # Solo i numeri "sciolti" (ore, giorni, date) sono rumore; un numero attaccato a una lettera
+    # o a un'altra cifra (short42, ep3) identifica la cosa: short42 e short43 sono due problemi.
+    # Nessun lookahead: "36h" (numero + unita') e' rumore come "36 ore" e va normalizzato.
+    return level + "|" + _LOOSE_NUMBER_RE.sub("#", text)
 
 
 def compute_status():

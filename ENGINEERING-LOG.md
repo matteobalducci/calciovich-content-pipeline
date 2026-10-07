@@ -151,7 +151,7 @@ confirmed a follow-up read reflected the change; repeated it with an oversized t
 confirmed the follow-up read still showed the old value, isolating the limit as the actual
 constraint.
 
-**Files.** `carica_youtube.py` (title/description update path).
+**Files.** `aggiorna_descrizioni.py` (the `videos().update()` path); the read-then-verify step is a working procedure, not code in this repo.
 
 ---
 
@@ -202,16 +202,20 @@ accumulates unconfirmed drafts faster than they're cleared; past a threshold, Ti
 own anti-spam heuristic starts rejecting new posts from the same account.
 
 **Fix.** `carica_tiktok.py` already supports publishing a single named item via `--only`;
-the fix here is a hard rule at the orchestration layer, not a code change to the publisher
-itself — never invoke it with more than one pending item in the same run, so the Inbox
-queue is only ever asked to grow by one before a human has a chance to clear it.
+the fix here is a rule in how the publisher is invoked, not a code change to it — never run
+it with more than one pending item, so the Inbox queue is only ever asked to grow by one
+before a human has a chance to clear it. The script's own default is `--limit 5`, so this
+is a convention held by the invoking side, not a limit the code enforces — and the
+dashboard's "retry all" action (`tiktok-retry-all` in `app_server.py`) runs `--all` without
+`--limit 1`, so the script's default of 5 applies: it is the one path that can still queue
+several posts at once.
 
 **Verification.** After the rule was adopted, a full week of daily runs each published at
 most one TikTok item; no further `spam_risk_too_many_pending_share` rejection occurred in
 that window.
 
-**Files.** `carica_tiktok.py` (`--only` / `--all` / `--limit`, invoked by policy with a
-single item at a time).
+**Files.** `carica_tiktok.py` (`--only` / `--all` / `--limit`; default `--limit 5`, invoked with
+a single item at a time by convention).
 
 ---
 

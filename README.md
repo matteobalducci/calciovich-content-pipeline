@@ -137,10 +137,12 @@ Measurement feeds back into what gets produced next.
   tables are replaced in full on every run rather than merged, because every local
   source already holds complete current state, not an incremental log — with one
   deliberate exception: the engagement snapshot table is append-only, writing just the
-  rows newer than `MAX(snapshot_at)` already in BigQuery, because since the cloud
-  collector below it has two independent writers, and a truncate from one would erase
-  what the other wrote in the meantime. BigQuery's free tier has no DML, so this is a
-  filtered load, not an `UPDATE`/`MERGE`. `examples/` has a runnable demo with no GCP
+  rows whose exact key `(channel, video, snapshot_at)` is not yet in BigQuery, because
+  since the cloud collector below it has two independent writers, and a truncate from one
+  would erase what the other wrote in the meantime (a plain `MAX(snapshot_at)` watermark
+  was the first design; it dropped legitimate late-arriving rows, see the idempotence
+  note under *Notable engineering decisions*). BigQuery's free tier has no DML, so this is
+  a filtered load, not an `UPDATE`/`MERGE`. `examples/` has a runnable demo with no GCP
   credentials required.
 - **`raccogli_snapshot_cloud.py`** — a cloud backstop for the collection gap above: one
   fresh snapshot of views/likes/comments every 6 hours from GitHub Actions (workflow in
@@ -152,8 +154,9 @@ Measurement feeds back into what gets produced next.
   the Mac's convention (Rome local time, naive), not the runner's UTC. The first version
   didn't: a green CI run had written zero rows, because the incremental filter compared
   strings across two timezone conventions and silently discarded everything. The script
-  now exits non-zero when it collected videos but wrote no rows, so a green run means
-  rows landed.
+  now exits non-zero when it knows videos but has no publishable row to write (none public,
+  or none returned by the API), and when rows were collected but none were new — so a
+  green run means rows landed.
 - **Looker Studio report** — five pages on top of the BigQuery model, connected under
   a dedicated Google identity with minimal IAM (dataset-level `READER` ACL +
   project-level `bigquery.jobUser`) rather than the personal account or the loader's

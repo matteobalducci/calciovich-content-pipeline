@@ -32,6 +32,19 @@ TOKEN_PATH = os.path.join(HERE, "youtube_analytics_token.json")
 ANALYTICS_SCOPES = ["https://www.googleapis.com/auth/yt-analytics.readonly"]
 
 
+def write_private(path, text):
+    """Scrive un file di credenziali leggibile solo dal proprietario. `os.open(..., 0o600)` vale
+    solo alla CREAZIONE: un token gia' esistente con permessi larghi li terrebbe, quindi si
+    restringe anche il file aperto (fchmod)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fh.fileno(), 0o600)
+        else:                                  # piattaforme senza fchmod (Windows)
+            os.chmod(path, 0o600)
+        fh.write(text)
+
+
 def get_analytics_credentials_unattended():
     """Nessun ramo interattivo raggiungibile: non importa InstalledAppFlow, non
     chiama run_local_server(). Se le credenziali non sono utilizzabili, propaga
@@ -59,9 +72,7 @@ def main():
     # 0o600 come youtube_readonly_auth.py: un token con refresh_token non deve essere
     # leggibile da altri utenti della macchina (il refresh sopra riscrive il file in
     # place, quindi i permessi restano quelli impostati qui).
-    fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(creds.to_json())
+    write_private(TOKEN_PATH, creds.to_json())
     print(f"OK — token salvato in {TOKEN_PATH}")
 
 

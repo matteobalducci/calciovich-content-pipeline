@@ -119,6 +119,13 @@ def main():
             "channel_key": dm.LEGACY_CHANNEL,
         })
 
+    if not rows:
+        # Video noti ma nessuno pubblico/leggibile (token sbagliato, canale cambiato, API che
+        # non risponde): zero righe e' esattamente il "verde che non ha scritto" di 03/10, per
+        # un'altra strada. Un run verde deve significare righe scritte.
+        sys.exit(f"Nessun video pubblico fra i {len(video_ids)} noti ({skipped_private} non "
+                  f"pubblici o non restituiti dall'API) — niente da scrivere: controlla token e canale.")
+
     schema = cb._schemas(bigquery)["fct_youtube_engagement_snapshot"]
     cb._ensure_table(client, bigquery, "fct_youtube_engagement_snapshot", schema)
     remote_keys = cb._existing_engagement_keys(client)

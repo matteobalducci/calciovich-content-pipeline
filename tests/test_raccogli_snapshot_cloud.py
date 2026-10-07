@@ -53,10 +53,9 @@ def test_the_cloud_job_selects_only_the_original_channels_videos():
     assert "COALESCE(channel_key, 'gol-impossibili') = 'gol-impossibili'" in sql    # legacy NULL rows are the original channel
 
 
-def test_the_cloud_job_labels_its_rows_with_the_original_channel_and_checks_ownership(monkeypatch):
-    import carica_bigquery as cb
-    written = {}
-    seen = {}
+def _stub_cloud_main(monkeypatch, stats, written, seen):
+    """Tutto cio' che main() tocca fuori dal proprio codice: BigQuery, rete, tabelle."""
+    import types
 
     class FakeBQ:
         pass
@@ -67,21 +66,42 @@ def test_the_cloud_job_labels_its_rows_with_the_original_channel_and_checks_owne
 
     def fake_fetch(ids, **kw):
         seen.update(kw)
-        return {"vOLD": {"views": 5, "likes": 1, "comments": 0, "privacy": "public"}}
+        return stats
     monkeypatch.setattr(rsc, "fetch_stats", fake_fetch)
     monkeypatch.setattr(rsc.cb, "_existing_engagement_keys", lambda c: set())
     monkeypatch.setattr(rsc.cb, "_ensure_table", lambda *a, **k: None)
     monkeypatch.setattr(rsc.cb, "_schemas", lambda b: {"fct_youtube_engagement_snapshot": []})
     monkeypatch.setattr(rsc.cb, "_write_table",
                         lambda c, b, name, rows, schema, write_disposition: written.update(rows=rows, mode=write_disposition))
-    import types
-    fake_modules = {"google.cloud": types.SimpleNamespace(bigquery=FakeBQ),
-                    "google.oauth2": types.SimpleNamespace(service_account=object())}
-    monkeypatch.setitem(sys.modules, "google.cloud", fake_modules["google.cloud"])
+    monkeypatch.setitem(sys.modules, "google.cloud", types.SimpleNamespace(bigquery=FakeBQ))
     monkeypatch.setitem(sys.modules, "google.cloud.bigquery", FakeBQ)
-    monkeypatch.setitem(sys.modules, "google.oauth2", fake_modules["google.oauth2"])
+    monkeypatch.setitem(sys.modules, "google.oauth2", types.SimpleNamespace(service_account=object()))
     monkeypatch.setitem(sys.modules, "google.oauth2.service_account", object())
+
+
+def test_the_cloud_job_labels_its_rows_with_the_original_channel_and_checks_ownership(monkeypatch):
+    import carica_bigquery as cb
+    written, seen = {}, {}
+    _stub_cloud_main(monkeypatch, {"vOLD": {"views": 5, "likes": 1, "comments": 0, "privacy": "public"}}, written, seen)
     rsc.main()
     assert written["mode"] == "WRITE_APPEND"
     assert [r["channel_key"] for r in written["rows"]] == ["gol-impossibili"]
     assert seen["expect_channel_id"] == cb.CHANNEL_IDS["gol-impossibili"]            # wrong-channel secret is refused
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("stats", [
+    {},                                                                               # l'API non restituisce nessun video
+    {"vOLD": {"views": 5, "likes": 1, "comments": 0, "privacy": "private"}},          # tutti non pubblici
+])
+def test_known_videos_but_no_publishable_row_fails_instead_of_a_green_empty_run(monkeypatch, stats):
+    """Un run verde deve significare righe scritte (e' cosi' che il bug dei fusi passo' inosservato):
+    anche con `rows == []`, che il vecchio controllo (`rows and not new_rows`) non vedeva."""
+    written, seen = {}, {}
+    _stub_cloud_main(monkeypatch, stats, written, seen)
+    with pytest.raises(SystemExit) as exc:
+        rsc.main()
+    assert "Nessun video pubblico" in str(exc.value)
+    assert not written                                                                # niente e' stato scritto
