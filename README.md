@@ -147,16 +147,22 @@ Measurement feeds back into what gets produced next.
 - **`raccogli_snapshot_cloud.py`** — a cloud backstop for the collection gap above: one
   fresh snapshot of views/likes/comments every 6 hours from GitHub Actions (workflow in
   `examples/youtube-stats-cloud.yml`; it is not enabled in this repo because it needs
-  credentials that live only in the production repo's secrets). Two details worth
-  knowing: it authenticates with a **read-only** token (`youtube.readonly`, its own OAuth
-  client, `youtube_readonly_auth.py`) rather than the upload-scoped one — a leaked
-  secret can read statistics, not touch the channel — and it has to write timestamps in
-  the Mac's convention (Rome local time, naive), not the runner's UTC. The first version
-  didn't: a green CI run had written zero rows, because the incremental filter compared
-  strings across two timezone conventions and silently discarded everything. The script
-  now exits non-zero when it knows videos but has no publishable row to write (none public,
-  or none returned by the API), and when rows were collected but none were new — so a
-  green run means rows landed.
+  credentials that live only in the production repo's secrets). It covers **both YouTube
+  channels**, each with **its own read-only token** (`youtube.readonly`, created per channel with
+  `youtube_readonly_auth.py --channel <name>`) rather than the upload-scoped one — a leaked secret can
+  read statistics, not touch a channel. Three details worth knowing:
+  - **Ownership is checked, not assumed.** Public statistics of any video are readable with any
+    token, so a token for the wrong channel raises no error — it would silently write rows under the
+    wrong label. Every read verifies the token's channel (`channels.list(mine=true)`) against the expected
+    ID, and the consent script refuses to *save* a token that belongs to the other channel (this caught a
+    real mix-up the first time the second channel was authorised).
+  - **One channel failing never hides the other.** Rows from healthy channels are written, the job still
+    ends in error, so a green run means "every expected channel wrote". A channel whose secret is not set
+    is skipped with a warning; once its token exists, zero known videos or zero rows is an error.
+  - **Timestamps follow the Mac's convention** (Rome local time, naive), not the runner's UTC. The first
+    version didn't: a green CI run had written zero rows, because the incremental filter compared strings
+    across two timezone conventions and silently discarded everything. The script now exits non-zero
+    whenever it collected videos but wrote no rows.
 - **Looker Studio report** — five pages on top of the BigQuery model, connected under
   a dedicated Google identity with minimal IAM (dataset-level `READER` ACL +
   project-level `bigquery.jobUser`) rather than the personal account or the loader's

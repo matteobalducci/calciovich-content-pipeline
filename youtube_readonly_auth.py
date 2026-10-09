@@ -17,30 +17,62 @@ progetto GCP calciovich-video-analytics). Lo scope e' fissato QUI, al momento de
 consenso: un token gia' concesso con piu' scope li mantiene tutti, quindi
 restringerlo dopo non e' possibile — va concesso stretto fin dall'inizio.
 
-USO (una volta, da un terminale con browser)
-  python3 youtube_readonly_auth.py
-Scegli, nella schermata Google, l'account/canale del canale attuale ("Calciovich"
-oggi, Gol Impossibili dopo il rebrand).
+UN TOKEN PER CANALE (client condiviso, token no): il token appartiene al canale scelto nella schermata
+di consenso, non al client OAuth, quindi lo stesso client a sola lettura serve entrambi i canali.
+  gol-impossibili -> youtube_readonly_token.json         (canale originale, secret YOUTUBE_READONLY_TOKEN_JSON)
+  calciovich      -> youtube_readonly_libro_token.json   (canale del libro, secret YOUTUBE_READONLY_LIBRO_TOKEN_JSON)
+Dopo il consenso il token viene verificato con channels.list(mine=True): se appartiene al canale sbagliato
+NON viene salvato (un token sbagliato non dà errore: scriverebbe righe con l'etichetta di un altro canale).
+
+USO (una volta per canale, da un terminale con browser)
+  python3 youtube_readonly_auth.py                      # canale originale (Gol Impossibili)
+  python3 youtube_readonly_auth.py --channel calciovich # canale del libro: nella schermata Google scegli QUEL canale
 """
+import argparse
 import os
+import sys
 
 from youtube_analytics_auth import write_private
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENT_SECRET = os.path.join(HERE, "youtube_client_secret_readonly.json")
-TOKEN_PATH = os.path.join(HERE, "youtube_readonly_token.json")
 READONLY_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
+ORIGINAL, BOOK = "gol-impossibili", "calciovich"
+TOKENS = {
+    ORIGINAL: os.path.join(HERE, "youtube_readonly_token.json"),
+    BOOK: os.path.join(HERE, "youtube_readonly_libro_token.json"),
+}
+CHANNEL_IDS = {"gol-impossibili": "UCLPBYAv19aizEYX4MmXV7rA", "calciovich": "UCy1V7Lwaeb8_6iaSEzSOtPA"}
+TOKEN_PATH = TOKENS[ORIGINAL]          # compatibilita': il canale originale
 
 
-def main():
+def verify_owner(creds, channel_key):
+    """Alza metriche_video.ChannelMismatch se il token non appartiene al canale atteso."""
+    import googleapiclient.discovery
+    import metriche_video
+    yt = googleapiclient.discovery.build("youtube", "v3", credentials=creds)
+    metriche_video.check_owner(yt, CHANNEL_IDS[channel_key])
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Consenso YouTube Data API a sola lettura, un token per canale")
+    ap.add_argument("--channel", choices=sorted(TOKENS), default=ORIGINAL)
+    args = ap.parse_args(argv)
+
     from google_auth_oauthlib.flow import InstalledAppFlow
+    import metriche_video
 
-    print("Consenso Google a SOLA LETTURA (youtube.readonly, progetto "
-          "calciovich-video-analytics)...")
+    print(f"Consenso Google a SOLA LETTURA (youtube.readonly) per il canale '{args.channel}'. "
+          f"Nella schermata Google scegli il canale {args.channel}...")
     flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET, READONLY_SCOPES)
     creds = flow.run_local_server(port=0)
-    write_private(TOKEN_PATH, creds.to_json())
-    print(f"OK — token salvato in {TOKEN_PATH}")
+    try:
+        verify_owner(creds, args.channel)
+    except metriche_video.ChannelMismatch as exc:
+        sys.exit(f"TOKEN NON SALVATO: hai autorizzato il canale sbagliato ({exc}). "
+                 f"Rilancia e scegli il canale {args.channel} nella schermata Google.")
+    write_private(TOKENS[args.channel], creds.to_json())
+    print(f"OK — token del canale '{args.channel}' verificato e salvato in {TOKENS[args.channel]}")
 
 
 if __name__ == "__main__":

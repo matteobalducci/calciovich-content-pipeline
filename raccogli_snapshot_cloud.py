@@ -36,7 +36,16 @@ youtube_token.json condiviso con carica_youtube.py che ha anche lo scope upload.
 Se questo secret uscisse, chi lo prende potrebbe leggere statistiche, non toccare
 il canale. Stesso principio di youtube_analytics_auth.py (token isolato dopo un
 incidente reale di scope troppo ampio che si risolveva sul canale sbagliato) e,
-con lo split di canale in arrivo, un token per canale, mai condiviso.
+con lo split di canale, un token per canale, mai condiviso.
+
+DUE CANALI (dal 2026-10-09): il job raccoglie entrambi, ognuno col SUO token a sola lettura
+(CHANNEL_TOKENS): Gol Impossibili (secret YOUTUBE_READONLY_TOKEN_JSON, obbligatorio) e Calciovich (secret
+YOUTUBE_READONLY_LIBRO_TOKEN_JSON, facoltativo SOLO nel senso che se il file token manca il canale viene
+saltato con un'annotazione ::warning::; se il token c'e', zero video noti o zero righe sono un errore). Ogni lettura verifica che il token appartenga
+davvero al canale atteso (channels.list mine=True): le statistiche pubbliche di un video si leggono con
+qualunque token, quindi un token sbagliato non darebbe errore e scriverebbe righe con l'etichetta di un altro
+canale. Un problema su un canale NON impedisce di scrivere le righe dell'altro, ma fa finire il job in errore:
+un run verde deve significare "tutti i canali attesi hanno scritto".
 
 USO (pensato per girare da GitHub Actions (vedi examples/youtube-stats-cloud.yml), eseguibile anche a mano per un test)
   python3 raccogli_snapshot_cloud.py
@@ -51,8 +60,13 @@ import dimensional_model as dm
 from metriche_video import fetch_stats
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-READONLY_TOKEN = os.path.join(HERE, "youtube_readonly_token.json")
 READONLY_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
+# canale -> (file del token nel checkout CI, obbligatorio?)
+CHANNEL_TOKENS = {
+    dm.LEGACY_CHANNEL: ("youtube_readonly_token.json", True),
+    "calciovich": ("youtube_readonly_libro_token.json", False),
+}
+READONLY_TOKEN = os.path.join(HERE, CHANNEL_TOKENS[dm.LEGACY_CHANNEL][0])     # compatibilita'
 
 
 def _snapshot_at_now():
@@ -65,19 +79,58 @@ def _snapshot_at_now():
     return datetime.now(ZoneInfo("Europe/Rome")).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
-def _known_video_content_keys(client, bigquery):
-    """{video_id: content_key} dei video del canale ORIGINALE gia' su BigQuery — niente app/data.json (non esiste
-    in un checkout CI), niente registry locali. Solo il canale originale: questo job ha il token (a sola lettura)
-    di quel canale e scrive righe etichettate con quel canale. Le righe storiche con channel_key NULL sono
-    del canale originale. I video del canale del libro NON si raccolgono da qui: servirebbe un job e un secret
-    separati per quel canale (la Data API legge le statistiche pubbliche di qualunque video, quindi senza
-    questo filtro il job scriverebbe righe del canale nuovo con l'etichetta sbagliata)."""
+def _known_video_content_keys(client, bigquery, channel_key=dm.LEGACY_CHANNEL):
+    """{video_id: content_key} dei video di UN canale gia' su BigQuery — niente app/data.json (non esiste in un
+    checkout CI), niente registry locali. Le righe storiche con channel_key NULL sono del canale originale. Il
+    filtro per canale serve perche' la Data API legge le statistiche pubbliche di qualunque video: senza di esso
+    un token scriverebbe righe di un canale con l'etichetta dell'altro."""
+    if channel_key not in CHANNEL_TOKENS:
+        raise ValueError(f"canale sconosciuto: {channel_key}")
     table_id = f"{cb.PROJECT}.{cb.DATASET}.fct_youtube_engagement_snapshot"
+    cond = (f"COALESCE(channel_key, '{dm.LEGACY_CHANNEL}') = '{channel_key}'" if channel_key == dm.LEGACY_CHANNEL
+            else f"channel_key = '{channel_key}'")
     rows = client.query(
-        f"SELECT DISTINCT video_id, content_key FROM `{table_id}` "
-        f"WHERE video_id IS NOT NULL AND COALESCE(channel_key, '{dm.LEGACY_CHANNEL}') = '{dm.LEGACY_CHANNEL}'"
+        f"SELECT DISTINCT video_id, content_key FROM `{table_id}` WHERE video_id IS NOT NULL AND {cond}"
     ).result()
     return {r["video_id"]: r["content_key"] for r in rows}
+
+
+def _collect_channel(client, bigquery, channel_key, token_path, snapshot_at):
+    """Righe di un canale il cui token ESISTE. Ritorna (rows, n_non_pubblici, problema|None). Non solleva mai:
+    un canale rotto (BigQuery, token, API) non deve impedire di scrivere l'altro; il problema viene riportato e
+    fa finire il job in errore. Facoltativo e' solo l'avere il token: se c'e', si aspettano dati."""
+    try:
+        video_content_key = _known_video_content_keys(client, bigquery, channel_key)
+        video_ids = sorted(video_content_key)
+        if not video_ids:
+            return [], 0, (f"{channel_key}: nessun video noto su BigQuery (tabella vuota) — il Mac deve "
+                           f"girare almeno una volta per primo.")
+        stats = fetch_stats(video_ids, token_path=token_path, scopes=READONLY_SCOPES,
+                            expect_channel_id=cb.CHANNEL_IDS[channel_key])
+    except (Exception, SystemExit) as exc:            # SystemExit: fetch_stats esce se il token e' illeggibile
+        return [], 0, f"{channel_key}: raccolta fallita ({type(exc).__name__}: {exc})"
+    rows, skipped_private = [], 0
+    for vid in video_ids:
+        info = stats.get(vid)
+        if not info or info.get("privacy") != "public":
+            skipped_private += 1
+            continue
+        rows.append({
+            "video_id": vid,
+            "content_key": video_content_key.get(vid),
+            "snapshot_at": snapshot_at,
+            "views": info.get("views"),
+            "likes": info.get("likes"),
+            "comments": info.get("comments"),
+            "channel_key": channel_key,
+        })
+    if not rows:
+        # Video noti ma nessuno pubblico/leggibile (token sbagliato, canale cambiato, API che non risponde):
+        # zero righe e' il "verde che non ha scritto" di 03/10 per un'altra strada.
+        return [], skipped_private, (f"{channel_key}: nessun video pubblico fra i {len(video_ids)} noti "
+                                     f"({skipped_private} non pubblici o non restituiti dall'API) — controlla "
+                                     f"token e canale.")
+    return rows, skipped_private, None
 
 
 def main():
@@ -91,59 +144,47 @@ def main():
         sys.exit(f"Chiave del service account assente ({cb.KEY_PATH}).")
 
     client = cb._bigquery_client(bigquery, service_account)
-
-    video_content_key = _known_video_content_keys(client, bigquery)
-    video_ids = sorted(video_content_key)
-    if not video_ids:
-        sys.exit("Nessun video noto su BigQuery (tabella vuota) — niente da "
-                  "aggiornare, il Mac deve girare almeno una volta per primo.")
-
-    stats = fetch_stats(video_ids, token_path=READONLY_TOKEN, scopes=READONLY_SCOPES,
-                        expect_channel_id=cb.CHANNEL_IDS[dm.LEGACY_CHANNEL])
     snapshot_at = _snapshot_at_now()
 
-    rows = []
-    skipped_private = 0
-    for vid in video_ids:
-        info = stats.get(vid)
-        if not info or info.get("privacy") != "public":
-            skipped_private += 1
+    rows, problems, summaries = [], [], []
+    for channel_key, (token_file, required) in CHANNEL_TOKENS.items():
+        token_path = os.path.join(HERE, token_file)
+        if not os.path.exists(token_path):
+            msg = f"{channel_key}: token {token_file} assente"
+            if required:
+                problems.append(msg)
+            else:
+                print(f"::warning::{msg} — canale saltato (imposta il secret per attivarlo)")
             continue
-        rows.append({
-            "video_id": vid,
-            "content_key": video_content_key.get(vid),
-            "snapshot_at": snapshot_at,
-            "views": info.get("views"),
-            "likes": info.get("likes"),
-            "comments": info.get("comments"),
-            "channel_key": dm.LEGACY_CHANNEL,
-        })
+        ch_rows, skipped, problem = _collect_channel(client, bigquery, channel_key, token_path, snapshot_at)
+        rows += ch_rows
+        if problem:
+            problems.append(problem)
+        elif ch_rows:
+            summaries.append(f"{channel_key}: {len(ch_rows)} video ({skipped} non pubblici)")
 
-    if not rows:
-        # Video noti ma nessuno pubblico/leggibile (token sbagliato, canale cambiato, API che
-        # non risponde): zero righe e' esattamente il "verde che non ha scritto" di 03/10, per
-        # un'altra strada. Un run verde deve significare righe scritte.
-        sys.exit(f"Nessun video pubblico fra i {len(video_ids)} noti ({skipped_private} non "
-                  f"pubblici o non restituiti dall'API) — niente da scrivere: controlla token e canale.")
+    new_rows = []
+    if rows:
+        schema = cb._schemas(bigquery)["fct_youtube_engagement_snapshot"]
+        cb._ensure_table(client, bigquery, "fct_youtube_engagement_snapshot", schema)
+        remote_keys = cb._existing_engagement_keys(client)
+        new_rows = dm.filter_new_engagement_rows(rows, remote_keys)      # per chiave esatta, non per limite
+        # Il controllo e' PER CANALE: con la stessa convenzione oraria del Mac ogni riga "adesso" e' nuova, quindi un
+        # canale con video raccolti ma zero righe nuove ha qualcosa che non va (bug dei fusi, 03/10), anche se l'altro
+        # canale ha scritto: un run verde deve significare "ogni canale atteso ha scritto".
+        for channel_key in sorted({r["channel_key"] for r in rows} - {r["channel_key"] for r in new_rows}):
+            n = sum(1 for r in rows if r["channel_key"] == channel_key)
+            problems.append(f"{channel_key}: nessuna riga scritta su {n} video raccolti (snapshot_at={snapshot_at}, "
+                            f"{len(remote_keys)} chiavi gia' remote) — controlla la convenzione oraria.")
+        if new_rows:
+            cb._write_table(client, bigquery, "fct_youtube_engagement_snapshot", new_rows,
+                             schema, write_disposition="WRITE_APPEND")
+            print(f"✓ fct_youtube_engagement_snapshot (cloud): {len(new_rows)} righe nuove — "
+                  + "; ".join(summaries))
 
-    schema = cb._schemas(bigquery)["fct_youtube_engagement_snapshot"]
-    cb._ensure_table(client, bigquery, "fct_youtube_engagement_snapshot", schema)
-    remote_keys = cb._existing_engagement_keys(client)
-    new_rows = dm.filter_new_engagement_rows(rows, remote_keys)      # per chiave esatta, non per limite
-
-    if rows and not new_rows:
-        # Non e' piu' un caso legittimo: con la stessa convenzione oraria del Mac, ogni
-        # riga "adesso" e' piu' recente di qualunque scrittura precedente. Zero righe
-        # scritte su video che ci sono = qualcosa non va, e un run verde non deve
-        # nasconderlo (e' esattamente cosi' che il bug dei fusi e' passato inosservato).
-        sys.exit(f"Nessuna riga scritta su {len(rows)} video raccolti (snapshot_at="
-                  f"{snapshot_at}, {len(remote_keys)} chiavi gia' remote) — controlla la convenzione "
-                  f"oraria di snapshot_at fra Mac e cloud.")
-
-    cb._write_table(client, bigquery, "fct_youtube_engagement_snapshot", new_rows,
-                     schema, write_disposition="WRITE_APPEND")
-    print(f"✓ fct_youtube_engagement_snapshot (cloud): {len(new_rows)} righe nuove "
-          f"su {len(video_ids)} video noti ({skipped_private} non pubblici, saltati)")
+    if problems:
+        # Le righe dei canali sani sono gia' scritte; il job va comunque in errore, ben visibile.
+        sys.exit("PROBLEMI: " + " | ".join(problems))
 
 
 if __name__ == "__main__":

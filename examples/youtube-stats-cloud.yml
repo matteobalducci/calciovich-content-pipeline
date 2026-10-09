@@ -6,7 +6,7 @@ name: YouTube stats (cloud backstop)
 # (in un monorepo aggiungi anche `defaults.run.working-directory`).
 #
 # Backstop indipendente al LaunchAgent locale com.calciovich.youtubestats: scrive
-# UNA fotografia fresca delle view/like/commenti ogni 6h su BigQuery, cosi' un
+# UNA fotografia fresca delle view/like/commenti di OGNI canale ogni 6h su BigQuery, cosi' un
 # gap di giorni nel LaunchAgent locale (Mac addormentato — vedi l'incidente del
 # 23-27/09/2026) non lascia piu' buchi nella tabella storica che alimenta il
 # grafico pubblico "Andamento views nel tempo" su Looker Studio.
@@ -15,6 +15,12 @@ name: YouTube stats (cloud backstop)
 # raccogli_snapshot_cloud.py e carica_bigquery.py): questo job e il LaunchAgent
 # del Mac non si cancellano mai a vicenda il lavoro, anche se girano a ridosso
 # l'uno dell'altro.
+
+# DUE CANALI (dal 2026-10-09): il job raccoglie Gol Impossibili (secret YOUTUBE_READONLY_TOKEN_JSON,
+# obbligatorio) e Calciovich (secret YOUTUBE_READONLY_LIBRO_TOKEN_JSON), ognuno col SUO token a sola lettura,
+# verificato contro l'ID del canale atteso. Il secret di Calciovich e' facoltativo solo nel senso che, se
+# manca, il canale viene saltato con un ::warning:: invece di far fallire il job; se c'e', zero video o zero
+# righe sono un errore. Creazione dei token: youtube_readonly_auth.py --channel <canale>.
 
 on:
   schedule:
@@ -45,10 +51,15 @@ jobs:
         run: |
           printf '%s' "$YOUTUBE_READONLY_TOKEN_JSON" > youtube_readonly_token.json
           printf '%s' "$BIGQUERY_LOADER_KEY_JSON" > bigquery_loader_key.json
+          # Canale del libro: facoltativo finche' il secret non esiste (lo script salta il canale con un warning)
+          if [ -n "$YOUTUBE_READONLY_LIBRO_TOKEN_JSON" ]; then
+            printf '%s' "$YOUTUBE_READONLY_LIBRO_TOKEN_JSON" > youtube_readonly_libro_token.json
+          fi
         env:
-          # Token a SOLA LETTURA (youtube.readonly), non quello con scope upload:
+          # Token a SOLA LETTURA (youtube.readonly), uno per canale, non quelli con scope upload:
           # vedi youtube_readonly_auth.py per il perche'.
           YOUTUBE_READONLY_TOKEN_JSON: ${{ secrets.YOUTUBE_READONLY_TOKEN_JSON }}
+          YOUTUBE_READONLY_LIBRO_TOKEN_JSON: ${{ secrets.YOUTUBE_READONLY_LIBRO_TOKEN_JSON }}
           BIGQUERY_LOADER_KEY_JSON: ${{ secrets.BIGQUERY_LOADER_KEY_JSON }}
 
       - name: Raccogli e scrivi lo snapshot
