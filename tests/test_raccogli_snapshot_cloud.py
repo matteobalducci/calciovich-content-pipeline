@@ -196,3 +196,17 @@ def test_one_channel_with_nothing_new_fails_even_if_the_other_channel_wrote(monk
         rsc.main()
     assert OLD in str(exc.value) and "nessuna riga scritta" in str(exc.value) and NEW not in str(exc.value)
     assert [r["channel_key"] for r in written["rows"]] == [NEW]                # l'altro canale e' stato scritto
+
+
+def test_the_cloud_collector_never_writes_the_channel_snapshot_table(monkeypatch):
+    """fct_channel_snapshot e' WRITE_TRUNCATE con UN solo scrittore (carica_bigquery.py sul Mac): se il collector
+    cloud iniziasse a scriverla, un TRUNCATE dell'uno cancellerebbe il lavoro dell'altro. Si esegue main() con un
+    client finto e si registra ogni tabella creata o scritta: l'unica ammessa e' l'engagement. (Prima di attivare i
+    KPI di canale nel cloud serve l'idempotenza per chiave esatta: vedi la nota sull'idempotenza.)"""
+    _stub_cloud_main(monkeypatch, {OLD: {"vOLD": "kO"}, NEW: {"vNEW": "kN"}}, {OLD: {"vOLD": PUBLIC}, NEW: {"vNEW": PUBLIC}})
+    touched = []
+    monkeypatch.setattr(rsc.cb, "_ensure_table", lambda c, b, name, *a, **k: touched.append(("ensure", name)))
+    monkeypatch.setattr(rsc.cb, "_write_table",
+                        lambda c, b, name, rows, schema, write_disposition: touched.append((write_disposition, name)))
+    rsc.main()
+    assert touched and {name for _, name in touched} == {"fct_youtube_engagement_snapshot"}

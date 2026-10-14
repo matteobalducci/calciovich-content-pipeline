@@ -63,6 +63,7 @@ USO
                                           # non scrive nulla su BigQuery
 """
 import os
+import upload_registry
 import sys
 import uuid
 from datetime import date, datetime, timezone
@@ -75,10 +76,13 @@ OUTPUT = os.path.join(HERE, "output")
 APP_DATA = os.path.join(HERE, "app", "data.json")
 STORICO = os.path.join(OUTPUT, "metriche-video-storico.json")                       # canale ORIGINALE
 STORICO_NEW = os.path.join(OUTPUT, "metriche-video-storico-calciovich.json")        # canale del libro
-FINESTRE = os.path.join(OUTPUT, "metriche-finestre-fisse.json")                     # solo canale originale (Analytics)
+FINESTRE = os.path.join(OUTPUT, "metriche-finestre-fisse.json")                     # canale originale (Analytics)
+FINESTRE_NEW = os.path.join(OUTPUT, "metriche-finestre-fisse-calciovich.json")      # canale del libro (Analytics)
 CHANNEL_IDS = {"gol-impossibili": "UCLPBYAv19aizEYX4MmXV7rA", "calciovich": "UCy1V7Lwaeb8_6iaSEzSOtPA"}
 YT_UPLOADS = os.path.join(OUTPUT, "youtube-uploads.json")                   # canale ORIGINALE (oggi Gol Impossibili)
 YT_UPLOADS_NEW = os.path.join(OUTPUT, "youtube-calciovich-uploads.json")    # canale del libro (dal 06/10/2026)
+STATS_ORIGINAL = os.path.join(HERE, "app", "youtube-stats.json")            # storico di canale (iscritti, view, video): canale originale
+STATS_NEW = os.path.join(HERE, "app", "youtube-stats-calciovich.json")      # idem, canale del libro
 IG_UPLOADS = os.path.join(OUTPUT, "instagram-uploads.json")
 TK_UPLOADS = os.path.join(OUTPUT, "tiktok-uploads.json")
 
@@ -90,6 +94,16 @@ CHANNEL_KEY_REQUIRED_FROM = "2026-10-07T00:00:00"
 PROJECT = "calciovich-video-analytics"
 DATASET = "calciovich_content"
 KEY_PATH = os.path.join(HERE, "bigquery_loader_key.json")
+
+
+def _window_records(path, nonempty):
+    """Le finestre fisse di un canale, o ValueError se il file manca / non e' un oggetto con `records` oggetto."""
+    data = load(path, None)
+    if not isinstance(data, dict) or not isinstance(data.get("records"), dict):
+        raise ValueError(f"{os.path.basename(path)}: file mancante o senza `records` valido")
+    if nonempty and not data["records"]:
+        raise ValueError(f"{os.path.basename(path)}: nessuna finestra (file vuoto)")
+    return data["records"]
 
 
 def build_all():
@@ -111,16 +125,38 @@ def build_all():
     engagement_rows = dm.build_fct_youtube_engagement_snapshot(
         storico.get("records", []) + storico_new.get("records", []))
 
-    finestre = load(FINESTRE, {"records": {}})
-    fixed_window_rows = dm.build_fct_youtube_fixed_window(finestre.get("records", {}))
+    # Tabella a TRUNCATE: un file di finestre mancante o malformato NON deve cancellare in silenzio le righe di quel
+    # canale (audit Codex 14/10/2026). Rows = None -> il main lascia la tabella intatta. Il file del canale originale
+    # deve avere almeno una finestra; quello del canale nuovo puo' essere vuoto ma deve esistere ed essere valido.
+    fixed_window_error = None
+    try:
+        fixed_window_rows = (
+            dm.build_fct_youtube_fixed_window(_window_records(FINESTRE, nonempty=True), dm.LEGACY_CHANNEL)
+            + dm.build_fct_youtube_fixed_window(_window_records(FINESTRE_NEW, nonempty=False), "calciovich"))
+    except ValueError as exc:
+        fixed_window_rows, fixed_window_error = None, str(exc)
 
-    yt_original = load_confirmed_youtube_uploads(YT_UPLOADS)
-    yt_new = load_confirmed_youtube_uploads(YT_UPLOADS_NEW)
+    # La fonte autorevole dei registri e' il database SQLite condiviso, non i JSON (backup legacy): se manca, Registry lo
+    # ricrea e reimporta backup datati. Se manca NON si apre nessun Registry (non lo si crea per effetto collaterale)
+    # e il main si ferma, qualunque sia il numero di eventi (audit Codex 14/10/2026).
+    # LIMITE NOTO (best-effort, non una garanzia): protegge dal DB assente al momento del caricamento; non distingue un
+    # DB creato nel frattempo da un altro processo (raccogli_metriche_video, dashboard, budget), perche' aprire un
+    # Registry lo crea e reimporta i JSON legacy: e' il recupero voluto di upload_registry, fuori dal perimetro di questo
+    # loader.
+    registry_db = os.path.join(os.path.dirname(os.path.abspath(YT_UPLOADS)), upload_registry.DB_NAME)
+    missing_registries = [] if os.path.exists(registry_db) else [upload_registry.DB_NAME]
+    if missing_registries:
+        yt_original, yt_new, ig_uploads, tk_uploads = {}, {}, {}, {}
+    else:
+        yt_original = load_confirmed_youtube_uploads(YT_UPLOADS)
+        yt_new = load_confirmed_youtube_uploads(YT_UPLOADS_NEW)
+        ig_uploads = load_confirmed_uploads(IG_UPLOADS, "mediaId")
+        tk_uploads = load_confirmed_uploads(TK_UPLOADS, "publishId")
     registry_data = {
         "youtube": yt_original,
         "youtube-calciovich": yt_new,
-        "instagram": load_confirmed_uploads(IG_UPLOADS, "mediaId"),
-        "tiktok": load_confirmed_uploads(TK_UPLOADS, "publishId"),
+        "instagram": ig_uploads,
+        "tiktok": tk_uploads,
     }
     publish_rows, excluded_publish = dm.build_fct_publish_event(registry_data, valid_keys)
     lineage_rows = dm.build_dim_content_lineage(yt_new, yt_original, valid_keys)
@@ -139,6 +175,17 @@ def build_all():
                 pass
     dim_date_rows = dm.build_dim_date(known_dates)
 
+    # Tabella a TRUNCATE: se i file di storico di canale non sono validi (mancanti, vuoti, nel posto sbagliato)
+    # NON si tocca la tabella, invece di scriverla vuota (audit Codex 14/10/2026). Rows = None -> il main la salta.
+    channel_snapshot_error = None
+    try:
+        channel_snapshot_rows, excluded_channel_points = dm.build_fct_channel_snapshot({
+            dm.LEGACY_CHANNEL: load(STATS_ORIGINAL, {}),
+            "calciovich": load(STATS_NEW, {}),
+        })
+    except ValueError as exc:
+        channel_snapshot_rows, excluded_channel_points, channel_snapshot_error = None, 0, str(exc)
+
     tables = {
         "dim_platform": dm.build_dim_platform(),
         "dim_date": dim_date_rows,
@@ -148,8 +195,12 @@ def build_all():
         "fct_publish_event": publish_rows,
         "dim_channel": dm.build_dim_channel(CHANNEL_IDS),
         "dim_content_lineage": lineage_rows,
+        "fct_channel_snapshot": channel_snapshot_rows,
     }
-    stats = {"dropped_content_dupes": dropped_dupes, "excluded_publish_events": excluded_publish}
+    stats = {"dropped_content_dupes": dropped_dupes, "excluded_publish_events": excluded_publish,
+             "excluded_channel_points": excluded_channel_points,
+             "channel_snapshot_error": channel_snapshot_error, "fixed_window_error": fixed_window_error,
+             "missing_registries": missing_registries}
     return tables, stats
 
 
@@ -210,6 +261,18 @@ def _schemas(bigquery):
             bigquery.SchemaField("scheduled_publish_at", "TIMESTAMP"),
             bigquery.SchemaField("copy_confirmed_at", "TIMESTAMP"),
             bigquery.SchemaField("reason", "STRING"),
+        ],
+        # Dati a livello di canale (iscritti, view totali, n. video) dagli storici di app/youtube-stats*.json.
+        # UNICO SCRITTORE: questo loader sul Mac (WRITE_TRUNCATE): il collector cloud scrive solo l'engagement.
+        # snapshot_date = giorno civile Europe/Rome, nessuna ora (non esiste nello storico).
+        "fct_channel_snapshot": [
+            bigquery.SchemaField("channel_key", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("snapshot_date", "DATE", mode="REQUIRED"),
+            bigquery.SchemaField("subscribers", "INT64"),
+            bigquery.SchemaField("total_views", "INT64"),
+            bigquery.SchemaField("video_count", "INT64"),
+            bigquery.SchemaField("ig_followers", "INT64"),
+            bigquery.SchemaField("era", "STRING"),
         ],
         "_run_metadata": [
             bigquery.SchemaField("run_id", "STRING", mode="REQUIRED"),
@@ -293,14 +356,34 @@ def main():
     print(f"dim_date: {len(tables['dim_date'])} righe")
     print(f"dim_platform: {len(tables['dim_platform'])} righe")
     print(f"fct_youtube_engagement_snapshot: {len(tables['fct_youtube_engagement_snapshot'])} righe")
-    print(f"fct_youtube_fixed_window: {len(tables['fct_youtube_fixed_window'])} righe")
+    if tables["fct_youtube_fixed_window"] is None:
+        print(f"⛔ fct_youtube_fixed_window NON sara' scritta: {stats['fixed_window_error']}")
+    else:
+        print(f"fct_youtube_fixed_window: {len(tables['fct_youtube_fixed_window'])} righe")
     print(f"dim_channel: {len(tables['dim_channel'])} righe")
+    if tables["fct_channel_snapshot"] is None:
+        print(f"⛔ fct_channel_snapshot NON sara' scritta: {stats['channel_snapshot_error']}")
+    else:
+        print(f"fct_channel_snapshot: {len(tables['fct_channel_snapshot'])} righe "
+              f"({stats['excluded_channel_points']} punti storici esclusi: data o contatore non validi)")
     print(f"dim_content_lineage: {len(tables['dim_content_lineage'])} righe")
     print(f"fct_publish_event: {len(tables['fct_publish_event'])} righe "
           f"({stats['excluded_publish_events']} escluse, fuori scope dim_content)")
 
+    # Tabelle a TRUNCATE costruite da input che, se manca, diventa "vuoto" (app/data.json o i registri assenti):
+    # scriverle vuote cancellerebbe lo storico buono (audit Codex 14/10/2026). Il run si ferma PRIMA di scrivere.
+    if not tables["dim_content"]:
+        sys.exit("⛔ dim_content vuota: app/data.json manca o non ha contenuti. Nessuna scrittura su BigQuery.")
+    if stats["missing_registries"]:    # zero eventi con il DB presente e' legittimo; DB assente no, qualunque sia il conteggio
+        sys.exit(f"⛔ database dei registri di upload assente ({', '.join(stats['missing_registries'])}). "
+                 f"Nessuna scrittura su BigQuery.")
+
+    skipped = [n for n in ("fct_youtube_fixed_window", "fct_channel_snapshot") if tables[n] is None]
+
     if dry_run:
         print("DRY RUN: nessuna scrittura su BigQuery.")
+        if skipped:    # il dry-run e' un preflight: un piano che il run reale tratterebbe come parziale non e' verde
+            sys.exit(f"⛔ dry-run: il run reale sarebbe PARZIALE ({', '.join(skipped)} non scritte).")
         return
 
     try:
@@ -319,7 +402,11 @@ def main():
     schemas = _schemas(bigquery)
 
     truncate_tables = ["dim_platform", "dim_date", "dim_content", "dim_channel", "dim_content_lineage",
-                        "fct_youtube_fixed_window", "fct_publish_event"]
+                        "fct_publish_event"]
+    if tables["fct_youtube_fixed_window"] is not None:    # file di finestre non validi: tabella intatta
+        truncate_tables.append("fct_youtube_fixed_window")
+    if tables["fct_channel_snapshot"] is not None:        # file di storico di canale non validi: tabella intatta
+        truncate_tables.append("fct_channel_snapshot")
     written = []
     for name in truncate_tables:
         _write_table(client, bigquery, name, tables[name], schemas[name],
@@ -356,6 +443,8 @@ def main():
     _write_table(client, bigquery, "_run_metadata", [run_row], schemas["_run_metadata"],
                  write_disposition="WRITE_APPEND")
     print(f"✓ _run_metadata: run {run_row['run_id']} completato ({len(written)} tabelle)")
+    if skipped:    # run PARZIALE: _run_metadata elenca solo cio' che e' stato scritto, ma il wrapper deve risultare rosso
+        sys.exit(f"⛔ run parziale: {', '.join(skipped)} NON scritte (tabelle intatte, vedi sopra). Uscita con errore.")
 
 
 

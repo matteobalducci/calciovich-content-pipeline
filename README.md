@@ -78,7 +78,11 @@ Measurement feeds back into what gets produced next.
 - **`aggiorna_youtube_stats.py`** — historical logger for subscribers, views and
   followers, running on a `LaunchAgent` schedule with **no retention cutoff**. Platform
   APIs expose rolling windows; keeping the full series locally is what makes trend and
-  cohort analysis possible later.
+  cohort analysis possible later. This public copy logs a single channel
+  (`app/youtube-stats.json`, tagged `channel: gol-impossibili`); the two-channel
+  collector lives in the private repo. Without the second history file
+  (`app/youtube-stats-calciovich.json`) the loader leaves `fct_channel_snapshot`
+  untouched and exits non-zero (partial run) instead of writing a half-empty table.
 - **`raccogli_metriche_video.py`** — a per-video time series (`metriche_video.py`
   extracts the fetch/classification logic shared with `check_outliers.py`, so there is
   one source of truth for what a video's numbers are, not two that can quietly

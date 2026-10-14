@@ -253,3 +253,108 @@ LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_channel` c ON c.cha
 LEFT JOIN `calciovich-video-analytics.calciovich_content.fct_youtube_fixed_window` w
   ON w.video_id = s.video_id AND COALESCE(w.channel_key, 'gol-impossibili') = s.channel_key
 WHERE s.rn = 1;
+
+-- --------------------------------------------------------------------------
+-- DATI A LIVELLO DI CANALE (14/10/2026). Viste NUOVE e additive: le viste sopra non
+-- cambiano. Regola del progetto: i due canali non si sommano ne' si confrontano alla pari, quindi nessuna di queste
+-- viste li unisce in un totale.
+-- --------------------------------------------------------------------------
+
+-- mart_channel_daily — una riga per (canale, giorno di rilevazione). Gli storici NON sono giornalieri continui:
+-- le variazioni sono rispetto alla rilevazione PRECEDENTE (days_since_previous dice quanto e' lontana) e
+-- views_per_day_between_snapshots e' una media fra due rilevazioni, non un dato giornaliero. Le variazioni NON
+-- attraversano il confine pre_split/post_split (rebranding del 06/10/2026): sul primo punto dell'era restano NULL.
+CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_channel_daily` AS
+WITH base AS (
+  SELECT
+    s.channel_key,
+    c.channel_name,
+    s.snapshot_date AS day,
+    s.era,
+    s.subscribers,
+    s.total_views,
+    s.video_count,
+    s.ig_followers,
+    LAG(s.snapshot_date) OVER w AS previous_snapshot_date,
+    LAG(s.era)           OVER w AS previous_era,
+    LAG(s.subscribers)   OVER w AS previous_subscribers,
+    LAG(s.total_views)   OVER w AS previous_total_views,
+    LAG(s.video_count)   OVER w AS previous_video_count
+  FROM `calciovich-video-analytics.calciovich_content.fct_channel_snapshot` s
+  LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_channel` c ON c.channel_key = s.channel_key
+  WINDOW w AS (PARTITION BY s.channel_key ORDER BY s.snapshot_date)
+)
+SELECT
+  channel_key,
+  channel_name,
+  day,
+  era,
+  subscribers,
+  total_views,
+  video_count,
+  ig_followers,
+  previous_snapshot_date,
+  DATE_DIFF(day, previous_snapshot_date, DAY) AS days_since_previous,
+  IF(previous_era = era, subscribers - previous_subscribers, NULL) AS subscribers_delta_since_previous,
+  IF(previous_era = era, total_views - previous_total_views, NULL) AS views_delta_since_previous,
+  IF(previous_era = era, video_count - previous_video_count, NULL) AS videos_delta_since_previous,
+  IF(previous_era = era,
+     SAFE_DIVIDE(total_views - previous_total_views, DATE_DIFF(day, previous_snapshot_date, DAY)),
+     NULL) AS views_per_day_between_snapshots,
+  IF(previous_era = era,
+     SAFE_DIVIDE(subscribers - previous_subscribers, DATE_DIFF(day, previous_snapshot_date, DAY)),
+     NULL) AS subscribers_per_day_between_snapshots,
+  IF(previous_era = era,
+     SAFE_DIVIDE(video_count - previous_video_count, DATE_DIFF(day, previous_snapshot_date, DAY)),
+     NULL) AS videos_per_day_between_snapshots
+FROM base;
+
+-- --------------------------------------------------------------------------
+-- mart_publish_cadence_by_channel — video YouTube usciti o programmati per settimana ISO (lunedi', fuso
+-- Europe/Rome) e canale. L'uscita e' scheduled_publish_at, altrimenti confirmed_at; i record senza nessuno dei
+-- due non hanno una data e restano fuori da questa vista (non vengono contati da nessuna parte).
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_publish_cadence_by_channel` AS
+WITH youtube AS (
+  SELECT
+    channel_key,
+    content_key,
+    COALESCE(scheduled_publish_at, confirmed_at) AS release_at
+  FROM `calciovich-video-analytics.calciovich_content.fct_publish_event`
+  WHERE platform = 'youtube' AND channel_key IS NOT NULL
+)
+SELECT
+  y.channel_key,
+  c.channel_name,
+  DATE_TRUNC(DATE(y.release_at, 'Europe/Rome'), ISOWEEK) AS iso_week_start,
+  COUNT(DISTINCT y.content_key) AS videos_released_or_scheduled
+FROM youtube y
+LEFT JOIN `calciovich-video-analytics.calciovich_content.dim_channel` c ON c.channel_key = y.channel_key
+WHERE y.release_at IS NOT NULL
+GROUP BY y.channel_key, c.channel_name, iso_week_start;
+
+-- --------------------------------------------------------------------------
+-- mart_data_freshness_by_channel — quanto sono vecchi i dati di ciascun canale. Espone SOLO timestamp assoluti:
+-- l'eta' si calcola nel report (nessuna funzione CURRENT_* in vista: la cache di Looker e la vista darebbero
+-- valori diversi per lo stesso dato).
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `calciovich-video-analytics.calciovich_content.mart_data_freshness_by_channel` AS
+WITH engagement AS (
+  SELECT channel_key, MAX(snapshot_at) AS last_engagement_snapshot_at, COUNT(DISTINCT video_id) AS videos_tracked
+  FROM `calciovich-video-analytics.calciovich_content.v_engagement_canonico`
+  GROUP BY channel_key
+),
+channel_level AS (
+  SELECT channel_key, MAX(snapshot_date) AS last_channel_snapshot_date
+  FROM `calciovich-video-analytics.calciovich_content.fct_channel_snapshot`
+  GROUP BY channel_key
+)
+SELECT
+  c.channel_key,
+  c.channel_name,
+  e.last_engagement_snapshot_at,
+  e.videos_tracked,
+  l.last_channel_snapshot_date
+FROM `calciovich-video-analytics.calciovich_content.dim_channel` c
+LEFT JOIN engagement e ON e.channel_key = c.channel_key
+LEFT JOIN channel_level l ON l.channel_key = c.channel_key;

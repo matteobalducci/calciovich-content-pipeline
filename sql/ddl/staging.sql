@@ -31,6 +31,20 @@ CREATE TABLE IF NOT EXISTS `calciovich-video-analytics.calciovich_content.dim_co
                         -- per Fase 4 (selettori/etichette nel report Looker Studio)
 );
 
+-- Dati a livello di CANALE (iscritti, view totali, n. video): una riga per (canale, giorno) dagli storici di
+-- app/youtube-stats*.json. UNICO SCRITTORE: carica_bigquery.py sul Mac (WRITE_TRUNCATE); il collector cloud scrive
+-- solo l'engagement. snapshot_date e' il giorno civile Europe/Rome, senza ora (non esiste nello storico).
+-- era = pre_split / post_split rispetto al 2026-10-06 (rebranding: il canale originale si chiamava "Calciovich").
+CREATE TABLE IF NOT EXISTS `calciovich-video-analytics.calciovich_content.fct_channel_snapshot` (
+  channel_key   STRING NOT NULL,
+  snapshot_date DATE   NOT NULL,
+  subscribers   INT64,   -- NULL se nascosto o assente, mai 0 inventato
+  total_views   INT64,
+  video_count   INT64,
+  ig_followers  INT64,
+  era           STRING
+);
+
 -- Statica, 3 righe.
 CREATE TABLE IF NOT EXISTS `calciovich-video-analytics.calciovich_content.dim_platform` (
   platform STRING NOT NULL  -- youtube / instagram / tiktok
@@ -120,12 +134,13 @@ CREATE TABLE IF NOT EXISTS `calciovich-video-analytics.calciovich_content.dim_co
 );
 
 -- --------------------------------------------------------------------------
--- _run_metadata — l'unica tabella WRITE_APPEND. Una riga per run RIUSCITO del
--- loader, scritta in un unico INSERT dopo che tutte le tabelle di staging sopra
--- sono state scritte con successo — mai una riga anticipata con completed_at NULL.
--- I consumatori leggono l'ultima riga per completed_at, senza dover filtrare NULL,
--- per sapere qual è l'ultimo punto nel tempo in cui le tabelle di staging erano
--- garantite coerenti fra loro.
+-- _run_metadata — l'unica tabella WRITE_APPEND. Una riga per run del loader che ha
+-- scritto qualcosa, in un unico INSERT dopo le scritture — mai una riga anticipata
+-- con completed_at NULL. `tables_written` elenca le tabelle DAVVERO scritte: se un
+-- input di una tabella a TRUNCATE non e' valido, la tabella resta intatta (stantia),
+-- e' assente da `tables_written` e il loader esce con errore (run parziale).
+-- I consumatori leggono l'ultima riga per completed_at, senza dover filtrare NULL;
+-- le tabelle in `tables_written` sono coerenti fra loro a quel momento, le altre no.
 -- --------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS `calciovich-video-analytics.calciovich_content._run_metadata` (

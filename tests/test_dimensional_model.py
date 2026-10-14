@@ -408,3 +408,100 @@ def test_the_repeated_hour_of_the_autumn_clock_change_does_not_drop_a_real_colle
     existing = {("gol-impossibili", "v1", "2026-10-25T02:50:00")}
     kept = dm.filter_new_engagement_rows([row("v1", "2026-10-25T02:10:00")], existing)
     assert len(kept) == 1
+
+
+# --- fct_channel_snapshot: dati a livello di canale (14/10/2026) -------------------------
+
+GOL = "gol-impossibili"
+LIBRO = "calciovich"
+
+
+def _file(channel, history):
+    return {"channel": channel, "history": history}
+
+
+def test_channel_snapshot_takes_the_channel_from_the_file_not_from_the_row():
+    """Lo storico del canale originale prima dello split ha il titolo 'Calciovich' e righe senza `channel`, o con
+    un `channel` discordante: la chiave del file decide, tutte le righe sono del canale originale."""
+    data = _file(GOL, [
+        {"date": "2026-10-01", "title": "Calciovich", "subs": 41, "views": 160000, "videos": 69},
+        {"date": "2026-10-02", "subs": 42, "views": 160100, "videos": 69, "channel": LIBRO},     # riga discordante
+        {"date": "2026-10-10", "title": "Gol Impossibili", "subs": 47, "views": 164883, "videos": 62, "channel": GOL},
+    ])
+    rows, excluded = dm.build_fct_channel_snapshot({GOL: data})
+    assert excluded == 0 and {r["channel_key"] for r in rows} == {GOL}
+    assert [r["snapshot_date"] for r in rows] == ["2026-10-01", "2026-10-02", "2026-10-10"]
+
+
+def test_channel_snapshot_marks_the_split_era_and_never_invents_a_time():
+    data = _file(GOL, [{"date": "2026-10-05", "subs": 37, "views": 1, "videos": 60},
+                       {"date": "2026-10-06", "subs": 38, "views": 2, "videos": 60}])
+    rows, _ = dm.build_fct_channel_snapshot({GOL: data})
+    assert [r["era"] for r in rows] == ["pre_split", "post_split"]
+    assert all(set(r) == {"channel_key", "snapshot_date", "subscribers", "total_views", "video_count",
+                          "ig_followers", "era"} for r in rows)      # nessun campo orario
+
+
+def test_channel_snapshot_last_row_of_a_day_wins():
+    data = _file(GOL, [{"date": "2026-10-10", "subs": 46, "views": 100, "videos": 62},
+                       {"date": "2026-10-10", "subs": 47, "views": 164883, "videos": 62}])
+    rows, _ = dm.build_fct_channel_snapshot({GOL: data})
+    assert len(rows) == 1 and rows[0]["subscribers"] == 47 and rows[0]["total_views"] == 164883
+
+
+def test_channel_snapshot_hidden_or_missing_subscribers_are_null_never_zero():
+    data = _file(LIBRO, [{"date": "2026-10-10", "subs": None, "views": 5, "videos": 7},
+                         {"date": "2026-10-11", "views": 6, "videos": 7},
+                         {"date": "2026-10-12", "subs": 0, "views": 7, "videos": 7}])
+    rows = {r["snapshot_date"]: r for r in dm.build_fct_channel_snapshot({LIBRO: data})[0]}
+    assert rows["2026-10-10"]["subscribers"] is None and rows["2026-10-11"]["subscribers"] is None
+    assert rows["2026-10-12"]["subscribers"] == 0          # zero iscritti e' un dato vero
+
+
+def test_channel_snapshot_malformed_dates_are_counted_not_loaded():
+    data = _file(GOL, [{"date": "2026-13-45", "subs": 1}, {"subs": 2}, "boh",
+                       {"date": "2026-10-10", "subs": 3, "views": 1, "videos": 1}])
+    rows, excluded = dm.build_fct_channel_snapshot({GOL: data})
+    assert len(rows) == 1 and excluded == 3
+
+
+@pytest.mark.parametrize("bad", [47.9, -1, float("nan"), float("inf"), "47", True])
+def test_channel_snapshot_invalid_counters_exclude_the_point_instead_of_truncating_or_crashing(bad):
+    data = _file(GOL, [{"date": "2026-10-09", "subs": 46, "views": 1, "videos": 1},
+                       {"date": "2026-10-10", "subs": bad, "views": 2, "videos": 1}])
+    rows, excluded = dm.build_fct_channel_snapshot({GOL: data})
+    assert [r["snapshot_date"] for r in rows] == ["2026-10-09"] and excluded == 1
+
+
+def test_channel_snapshot_integral_floats_are_accepted_as_integers():
+    rows, _ = dm.build_fct_channel_snapshot({GOL: _file(GOL, [{"date": "2026-10-10", "subs": 47.0, "views": 9.0, "videos": 1}])})
+    assert rows[0]["subscribers"] == 47 and isinstance(rows[0]["subscribers"], int)
+
+
+@pytest.mark.parametrize("bad_file", [
+    {},                                                            # file vuoto / mancante (load() -> {})
+    None,
+    [],
+    {"history": [{"date": "2026-10-10", "subs": 1}]},              # `channel` top-level assente
+    {"channel": LIBRO, "history": [{"date": "2026-10-10", "subs": 1}]},   # canale sbagliato nel file
+    {"channel": GOL, "history": []},
+    {"channel": GOL},
+    {"channel": GOL, "history": [{"date": "boh"}]},                # nessun punto valido
+])
+def test_channel_snapshot_refuses_a_file_that_would_produce_zero_rows(bad_file):
+    """WRITE_TRUNCATE: zero righe = tabella cancellata. Il costruttore deve fallire, non ritornare []."""
+    with pytest.raises(ValueError):
+        dm.build_fct_channel_snapshot({GOL: bad_file})
+
+
+def test_channel_snapshot_refuses_an_unknown_channel():
+    with pytest.raises(ValueError):
+        dm.build_fct_channel_snapshot({"canale-inventato": _file("canale-inventato", [{"date": "2026-10-10"}])})
+
+
+def test_channel_snapshot_excludes_a_point_with_a_valid_date_but_no_views_or_videos():
+    """Audit Codex 14/10/2026: una riga con la sola data non e' una rilevazione, e non deve sostituire lo storico."""
+    rows, excluded = dm.build_fct_channel_snapshot({GOL: {"channel": GOL, "history": [
+        {"date": "2026-10-14"}, {"date": "2026-10-13", "subs": 5, "views": 10},
+        {"date": "2026-10-12", "subs": 5, "views": 10, "videos": 3}]}})
+    assert [r["snapshot_date"] for r in rows] == ["2026-10-12"] and excluded == 2

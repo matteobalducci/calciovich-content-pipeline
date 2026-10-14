@@ -88,6 +88,7 @@ def main():
     hist.sort(key=lambda h: h["date"])
     out["history"] = hist  # archivio completo, mai tagliato (vedi nota in testa al file)
     out["latest"] = snapshot
+    out["channel"] = "gol-impossibili"   # il builder di fct_channel_snapshot lega lo storico al canale con questo campo
     out["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)

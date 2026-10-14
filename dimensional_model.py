@@ -21,6 +21,7 @@ dim_content — foto/Stories Instagram fuori dal calendario video ne restano fuo
 con un conteggio esplicito di quante righe sono state escluse (mai un'esclusione
 silenziosa).
 """
+import math
 import os
 from datetime import date, timedelta
 
@@ -234,10 +235,9 @@ def filter_new_engagement_rows(engagement_rows, existing_keys):
 
 
 def build_fct_youtube_fixed_window(finestre_records, channel_key=LEGACY_CHANNEL):
-    """Staging 1:1 da metriche-finestre-fisse.json (Fase 2). finestre_records e' il dict {video_id: record}
-    cosi' com'e' scritto da raccogli_finestre_fisse.py. Le finestre fisse vengono da YouTube Analytics, che
-    oggi esiste SOLO per il canale originale (il canale nuovo non ha ancora il consenso `yt-analytics.readonly`):
-    `channel_key` e' quindi quello del canale che le ha prodotte, dichiarato dal chiamante."""
+    """Staging 1:1 da metriche-finestre-fisse*.json (Fase 2). finestre_records e' il dict {video_id: record}
+    cosi' com'e' scritto da raccogli_finestre_fisse.py, UNO per canale (file e token Analytics separati):
+    `channel_key` e' quello del canale che le ha prodotte, dichiarato dal chiamante, che concatena i due canali."""
     return [{
         "video_id": rec.get("video_id"),
         "content_key": rec.get("key"),
@@ -321,3 +321,89 @@ def build_dim_content_lineage(new_channel_records, original_channel_records, val
             "reason": rec.get("republish_motivo"),
         })
     return rows
+
+
+# Data dello split dei canali: prima il canale originale si chiamava "Calciovich" e conteneva anche la storia, dal
+# 06/10/2026 e' "Gol Impossibili" (rebranding, video 69 -> 60). Una serie che attraversa questa data non e'
+# omogenea: `era` la marca e le viste non calcolano variazioni fra un'era e l'altra.
+SPLIT_DATE = "2026-10-06"
+
+
+def _count_or_none(value):
+    """Un contatore valido e' un intero finito >= 0 (o un float intero come 47.0). Ritorna (valido, numero|None):
+    assente/None -> (True, None); qualunque altra cosa (47.9, -1, NaN, inf, stringa, bool) -> (False, None).
+    Niente troncamenti silenziosi e nessun OverflowError che fermi l'intero loader."""
+    if value is None:
+        return True, None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False, None
+    if isinstance(value, float):
+        if not math.isfinite(value) or value != int(value):
+            return False, None
+        value = int(value)
+    return (value >= 0), (value if value >= 0 else None)
+
+
+def build_fct_channel_snapshot(stats_by_channel):
+    """Una riga per (canale, giorno) dagli storici di canale (`history` di app/youtube-stats*.json).
+
+    stats_by_channel: {channel_key: contenuto del file JSON}. Ritorna (righe, escluse): i punti con data
+    malformata, non-oggetto o con un contatore non valido NON entrano e vengono contati (mai un'esclusione
+    silenziosa).
+
+    FAIL-CLOSED (audit Codex del 14/10/2026): la tabella e' scritta con WRITE_TRUNCATE, quindi un file mancante,
+    vuoto o nel posto sbagliato non deve poter produrre "zero righe" da scrivere. ValueError se, per un canale: il
+    file non e' un oggetto; `channel` top-level manca o non coincide con la chiave attesa; `history` e' vuota o
+    manca; nessun punto e' valido. Il chiamante decide di NON toccare la tabella.
+    Un punto senza `views` e `videos` e' escluso (e contato): solo `subs` e `ig_followers` possono mancare.
+
+    Regole (contestazione Codex del 14/10/2026):
+    - `channel_key` e' quello del FILE (chiave del dizionario e campo top-level), mai della singola riga: lo
+      storico del canale originale prima dello split ha il titolo "Calciovich" e righe senza `channel`.
+    - una riga per giorno: se il giorno compare piu' volte vince l'ULTIMA nell'array.
+    - `subscribers` assente/None (nascosto) -> NULL, mai 0 (0 iscritti e' un dato; "nascosto" no).
+    - `snapshot_date` e' il giorno civile di Europe/Rome (lo scrive il collector del Mac, in Italia); non si
+      inventa un'ora: non esiste nello storico.
+    """
+    known = {c["channel_key"] for c in CHANNELS}
+    rows, excluded = [], 0
+    for channel_key, data in stats_by_channel.items():
+        if channel_key not in known:
+            raise ValueError(f"canale sconosciuto nello storico: {channel_key!r}")
+        if not isinstance(data, dict):
+            raise ValueError(f"storico di {channel_key!r}: il file non e' un oggetto JSON")
+        if data.get("channel") != channel_key:
+            raise ValueError(f"storico di {channel_key!r}: `channel` top-level e' {data.get('channel')!r}, "
+                             f"deve essere {channel_key!r}")
+        history = data.get("history")
+        if not isinstance(history, list) or not history:
+            raise ValueError(f"storico di {channel_key!r}: `history` vuota o mancante")
+        by_day = {}
+        for point in history:
+            try:
+                day = date.fromisoformat(str(point["date"]))
+            except (KeyError, TypeError, ValueError):
+                excluded += 1
+                continue
+            counters = {f: _count_or_none(point.get(f)) for f in ("subs", "views", "videos", "ig_followers")}
+            if not all(ok for ok, _ in counters.values()):
+                excluded += 1
+                continue
+            if counters["views"][1] is None or counters["videos"][1] is None:   # una riga senza view e video non e' una rilevazione
+                excluded += 1
+                continue
+            by_day[day.isoformat()] = {f: v for f, (_, v) in counters.items()}       # l'ultima del giorno vince
+        if not by_day:
+            raise ValueError(f"storico di {channel_key!r}: nessun punto valido su {len(history)}")
+        for day in sorted(by_day):
+            point = by_day[day]
+            rows.append({
+                "channel_key": channel_key,
+                "snapshot_date": day,
+                "subscribers": point["subs"],
+                "total_views": point["views"],
+                "video_count": point["videos"],
+                "ig_followers": point["ig_followers"],
+                "era": "pre_split" if day < SPLIT_DATE else "post_split",
+            })
+    return rows, excluded
