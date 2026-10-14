@@ -34,7 +34,11 @@ def repo(tmp_path, monkeypatch):
 
 
 def write_uploads(repo, uploads):
+    """Fixture storica: il JSON legacy + la prima apertura di un publisher, che importa il JSON nel DB. I consumer di
+    analytics leggono in SOLA LETTURA (registry_readonly) e non importano nulla da soli."""
+    import upload_registry
     (repo / "youtube-uploads.json").write_text(json.dumps(uploads))
+    upload_registry.Registry(str(repo / "youtube-uploads.json")).close()
 
 
 def confirm_in_registry(repo, key, video_id, **meta):

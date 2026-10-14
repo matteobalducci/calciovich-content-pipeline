@@ -136,22 +136,18 @@ def build_all():
     except ValueError as exc:
         fixed_window_rows, fixed_window_error = None, str(exc)
 
-    # La fonte autorevole dei registri e' il database SQLite condiviso, non i JSON (backup legacy): se manca, Registry lo
-    # ricrea e reimporta backup datati. Se manca NON si apre nessun Registry (non lo si crea per effetto collaterale)
-    # e il main si ferma, qualunque sia il numero di eventi (audit Codex 14/10/2026).
-    # LIMITE NOTO (best-effort, non una garanzia): protegge dal DB assente al momento del caricamento; non distingue un
-    # DB creato nel frattempo da un altro processo (raccogli_metriche_video, dashboard, budget), perche' aprire un
-    # Registry lo crea e reimporta i JSON legacy: e' il recupero voluto di upload_registry, fuori dal perimetro di questo
-    # loader.
-    registry_db = os.path.join(os.path.dirname(os.path.abspath(YT_UPLOADS)), upload_registry.DB_NAME)
-    missing_registries = [] if os.path.exists(registry_db) else [upload_registry.DB_NAME]
-    if missing_registries:
-        yt_original, yt_new, ig_uploads, tk_uploads = {}, {}, {}, {}
-    else:
+    # I registri si leggono in SOLA LETTURA (registry_readonly): con il database assente o illeggibile `read_records`
+    # solleva e il run si ferma prima di scrivere (audit Codex 14/10/2026). Mai Registry(): creerebbe il DB e
+    # reimporterebbe i JSON legacy. Zero upload con il DB presente e' invece uno stato legittimo.
+    registry_error = None
+    try:
         yt_original = load_confirmed_youtube_uploads(YT_UPLOADS)
         yt_new = load_confirmed_youtube_uploads(YT_UPLOADS_NEW)
         ig_uploads = load_confirmed_uploads(IG_UPLOADS, "mediaId")
         tk_uploads = load_confirmed_uploads(TK_UPLOADS, "publishId")
+    except upload_registry.RegistryCorrupt as exc:
+        yt_original, yt_new, ig_uploads, tk_uploads = {}, {}, {}, {}
+        registry_error = str(exc)
     registry_data = {
         "youtube": yt_original,
         "youtube-calciovich": yt_new,
@@ -200,7 +196,7 @@ def build_all():
     stats = {"dropped_content_dupes": dropped_dupes, "excluded_publish_events": excluded_publish,
              "excluded_channel_points": excluded_channel_points,
              "channel_snapshot_error": channel_snapshot_error, "fixed_window_error": fixed_window_error,
-             "missing_registries": missing_registries}
+             "registry_error": registry_error}
     return tables, stats
 
 
@@ -374,9 +370,8 @@ def main():
     # scriverle vuote cancellerebbe lo storico buono (audit Codex 14/10/2026). Il run si ferma PRIMA di scrivere.
     if not tables["dim_content"]:
         sys.exit("⛔ dim_content vuota: app/data.json manca o non ha contenuti. Nessuna scrittura su BigQuery.")
-    if stats["missing_registries"]:    # zero eventi con il DB presente e' legittimo; DB assente no, qualunque sia il conteggio
-        sys.exit(f"⛔ database dei registri di upload assente ({', '.join(stats['missing_registries'])}). "
-                 f"Nessuna scrittura su BigQuery.")
+    if stats["registry_error"]:    # zero upload con il DB presente e' legittimo; DB assente/illeggibile no
+        sys.exit(f"⛔ registri di upload non leggibili: {stats['registry_error']}. Nessuna scrittura su BigQuery.")
 
     skipped = [n for n in ("fct_youtube_fixed_window", "fct_channel_snapshot") if tables[n] is None]
 

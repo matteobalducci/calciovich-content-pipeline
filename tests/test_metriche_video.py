@@ -209,12 +209,26 @@ def test_load_confirmed_youtube_uploads_falls_back_to_external_id_after_a_reconc
 
 
 def test_load_confirmed_youtube_uploads_still_picks_up_legacy_json_entries(tmp_path):
-    """Pre-migrazione: i record importati dal JSON legacy sono trattati come
-    CONFIRMED di default (upload_registry.state_of()) — non deve regredire il
-    comportamento gia' in produzione per gli upload storici."""
+    """Pre-migrazione: i record importati dal JSON legacy sono trattati come CONFIRMED di default
+    (upload_registry.state_of()). L'import lo fa la prima apertura di un publisher (Registry); il consumer legge
+    poi in sola lettura. Non deve regredire il comportamento gia' in produzione per gli upload storici."""
     import json
+    import upload_registry
     from metriche_video import load_confirmed_youtube_uploads
     path = tmp_path / "youtube-uploads.json"
     path.write_text(json.dumps({"short01-x.vert": {"videoId": "vidOLD"}}))
+    upload_registry.Registry(str(path)).close()          # il publisher importa il JSON nel DB
     uploads = load_confirmed_youtube_uploads(str(path))
     assert uploads["short01-x.vert"]["videoId"] == "vidOLD"
+
+
+def test_load_confirmed_uploads_without_the_db_raises_and_creates_nothing(tmp_path):
+    """Con il DB assente un consumer NON deve crearlo ne' importare il JSON legacy come se fosse stato vero."""
+    import json
+    import registry_readonly
+    from metriche_video import load_confirmed_youtube_uploads
+    path = tmp_path / "youtube-uploads.json"
+    path.write_text(json.dumps({"short01-x.vert": {"videoId": "vidOLD"}}))
+    with pytest.raises(registry_readonly.RegistryMissing):
+        load_confirmed_youtube_uploads(str(path))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["youtube-uploads.json"]

@@ -83,6 +83,10 @@ Measurement feeds back into what gets produced next.
   collector lives in the private repo. Without the second history file
   (`app/youtube-stats-calciovich.json`) the loader leaves `fct_channel_snapshot`
   untouched and exits non-zero (partial run) instead of writing a half-empty table.
+  Analytics consumers read the upload registries through `registry_readonly.py` (SQLite
+  `mode=ro`: no database is created and no legacy JSON is re-imported; a missing database is an
+  error, not "no uploads"). The public `stato_pipeline.py` dashboard still opens `Registry`
+  directly and is out of that scope.
 - **`raccogli_metriche_video.py`** — a per-video time series (`metriche_video.py`
   extracts the fetch/classification logic shared with `check_outliers.py`, so there is
   one source of truth for what a video's numbers are, not two that can quietly

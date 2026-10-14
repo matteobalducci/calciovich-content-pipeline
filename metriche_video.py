@@ -12,6 +12,7 @@ import os, sys, re
 from datetime import date, timedelta
 
 import upload_registry  # scrittura/lettura atomica
+import registry_readonly  # lettura dei registri senza creare ne' migrare nulla
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_PATH = os.path.join(HERE, "youtube_token.json")
@@ -60,9 +61,10 @@ def load_confirmed_uploads(path, id_field):
     confirm(key, external_id=vid, videoId=vid, ...)) — quando manca il primo, il
     secondo e' sempre presente per un record davvero CONFIRMED (confirm() lo richiede
     come parametro posizionale)."""
-    registry = upload_registry.Registry(path)
+    # SOLA LETTURA (registry_readonly): `Registry(path)` creerebbe il DB e reimporterebbe i JSON legacy. Con DB assente
+    # solleva RegistryMissing invece di inventare "nessun upload" (audit Codex 14/10/2026).
     out = {}
-    for key, record in registry.data.items():
+    for key, record in registry_readonly.read_records(path).items():
         if upload_registry.state_of(record) != upload_registry.CONFIRMED:
             continue
         if not record.get(id_field) and record.get("external_id"):
