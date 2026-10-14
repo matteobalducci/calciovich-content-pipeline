@@ -97,6 +97,10 @@ def _app_data_categoria_map(app_data=None):
                 out[base] = "canonical"
             elif cat == "Audiolibro (costo zero)":
                 out[base] = "long-form"
+            elif cat == "Gol-AI":
+                # I gol nuovi non hanno piu' il nome `settimanaN-dayM-*`: senza questa riga finivano in
+                # "altro" e sparivano dal confronto per categoria (verifica del 14/10/2026).
+                out[base] = "gol-ai"
     return out
 
 

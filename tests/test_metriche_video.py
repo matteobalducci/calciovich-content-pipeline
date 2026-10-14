@@ -107,6 +107,19 @@ def test_an_unrecognised_categoria_value_is_silently_excluded_from_the_map():
     assert app_map["short12-noto"] == "canonical"
 
 
+def test_gol_ai_items_are_mapped_even_without_the_old_settimana_day_name():
+    """I gol nuovi (stop-missile-1.tv, rovesciata-30m-2.tv...) non hanno `settimanaN-dayM`: la categoria
+    deve venire da app/data.json, altrimenti diventano "altro" e spariscono dal confronto per categoria."""
+    app_data = {"weeks": [{"items": [
+        {"file": "/output/ai-clips/stop-missile-1.tv.mp4", "categoria": "Gol-AI"},
+        {"file": "/output/ai-clips/rovesciata-30m-2.tv.mp4", "categoria": "Gol-AI"},
+    ]}]}
+    app_map = _app_data_categoria_map(app_data)
+    assert categoria("stop-missile-1.tv", app_map) == "gol-ai"
+    assert categoria("rovesciata-30m-2.tv", app_map) == "gol-ai"
+    assert categoria("stop-missile-1.tv", {}) == "altro"   # senza la mappa il nome da solo non basta
+
+
 def test_app_data_map_reads_the_real_file_by_default(tmp_path, monkeypatch):
     """Il default (nessun app_data passato) deve continuare a leggere APP_DATA dal
     disco — il parametro iniettabile e' solo per i test, non cambia il comportamento
