@@ -163,3 +163,52 @@ def test_a_permission_error_on_the_directory_is_a_read_error_not_a_missing_datab
     with pytest.raises(rr.RegistryReadError) as exc:
         rr.read_records(str(tmp_path / "youtube-uploads.json"))
     assert not isinstance(exc.value, rr.RegistryMissing)
+
+
+def test_a_shared_connection_reads_every_platform_with_the_same_shape_as_read_records(tmp_path):
+    _populate(tmp_path)
+    path = str(tmp_path / "youtube-uploads.json")
+    conn = rr.open_readonly(path)
+    try:
+        assert rr.read_records_from_connection(conn, "youtube") == rr.read_records(path)
+        assert rr.read_records_from_connection(conn, "instagram")["short01.vert"]["external_id"] == "medIG"
+        assert rr.read_records_from_connection(conn, "tiktok") == {}        # piattaforma senza righe: stato legittimo
+    finally:
+        conn.close()
+
+
+def test_open_readonly_never_creates_the_database(tmp_path):
+    with pytest.raises(rr.RegistryMissing):
+        rr.open_readonly(str(tmp_path / "youtube-uploads.json"))
+    assert _files(tmp_path) == []
+
+
+def test_one_transaction_does_not_see_a_concurrent_commit_between_two_reads(tmp_path):
+    _populate(tmp_path)
+    path = str(tmp_path / "youtube-uploads.json")
+    writer = upload_registry.Registry(path)
+    conn = rr.open_readonly(path)
+    try:
+        conn.execute("BEGIN")
+        before = rr.read_records_from_connection(conn, "youtube")
+        writer.confirm("short02.vert", external_id="vidNEW", videoId="vidNEW")       # commit dopo la prima lettura
+        after = rr.read_records_from_connection(conn, "youtube")
+        conn.rollback()
+    finally:
+        conn.close()
+        writer.close()
+    assert set(before) == set(after) == {"short01.vert"}
+    assert set(rr.read_records(path)) == {"short01.vert", "short02.vert"}            # una lettura nuova lo vede
+
+
+def test_a_shared_connection_on_a_database_without_the_uploads_table_is_missing(tmp_path):
+    conn = sqlite3.connect(tmp_path / upload_registry.DB_NAME)
+    conn.execute("CREATE TABLE spend (x TEXT)")
+    conn.commit()
+    conn.close()
+    ro = rr.open_readonly(str(tmp_path / "youtube-uploads.json"))
+    try:
+        with pytest.raises(rr.RegistryMissing):
+            rr.read_records_from_connection(ro, "youtube")
+    finally:
+        ro.close()
