@@ -57,10 +57,17 @@ def db_path(path):
     return os.path.join(os.path.dirname(os.path.abspath(path)) or ".", upload_registry.DB_NAME)
 
 
+def _uri(db):
+    """URI SQLite `mode=ro` con il percorso ESCAPATO: un `?`, un `#` o un `%xx` nel nome di una cartella non devono
+    cambiare il file aperto (audit Codex 15/10/2026)."""
+    from urllib.parse import quote
+    return f"file:{quote(os.path.abspath(db), safe='/')}?mode=ro"
+
+
 def _read_once(db, platform):
     """Un tentativo: apertura -> verifica schema -> SELECT, con una connessione nuova chiusa in `finally`.
     Ritorna ('ok', records) | ('no_table', None). Solleva sqlite3.Error per l'esito da classificare fuori."""
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    conn = sqlite3.connect(_uri(db), uri=True, timeout=5)
     try:
         conn.row_factory = sqlite3.Row
         has_table = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'uploads'").fetchone()
@@ -85,17 +92,20 @@ def open_readonly(path):
     last = None
     for attempt in range(ATTEMPTS):
         try:
-            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            conn = sqlite3.connect(_uri(db), uri=True, timeout=5)
             conn.row_factory = sqlite3.Row
             return conn
         except sqlite3.OperationalError as exc:
             msg = str(exc).lower()
-            transient = "locked" in msg or "busy" in msg or "unable to open" in msg or "disk i/o" in msg
+            transient = "locked" in msg or "busy" in msg
+            retryable = transient or "unable to open" in msg or "disk i/o" in msg
             last = exc
-            if transient and attempt < ATTEMPTS - 1:
+            if retryable and attempt < ATTEMPTS - 1:
                 time.sleep(PAUSE)
                 continue
-            raise RegistryReadBusy(f"{db}: non apribile dopo {attempt + 1} tentativi: {exc}") from exc
+            if transient:
+                raise RegistryReadBusy(f"{db}: ancora bloccato dopo {attempt + 1} tentativi: {exc}") from exc
+            raise RegistryReadError(f"{db}: non apribile: {exc}") from exc     # permessi, I/O permanente, percorso errato
         except sqlite3.DatabaseError as exc:
             raise RegistryReadError(f"{db}: stato dei registri non leggibile: {exc}") from exc
     raise RegistryReadError(f"{db}: apertura non riuscita: {last}")   # non raggiungibile in pratica

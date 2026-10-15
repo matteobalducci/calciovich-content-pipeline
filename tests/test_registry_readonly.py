@@ -212,3 +212,53 @@ def test_a_shared_connection_on_a_database_without_the_uploads_table_is_missing(
             rr.read_records_from_connection(ro, "youtube")
     finally:
         ro.close()
+
+
+def test_open_readonly_permanent_open_errors_are_read_errors_not_busy(tmp_path, monkeypatch):
+    """Permessi / I/O permanente: dopo i tentativi e' RegistryReadError (il contratto), non 'busy'."""
+    upload_registry.Registry(str(tmp_path / "youtube-uploads.json")).close()
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise sqlite3.OperationalError("unable to open database file")
+    monkeypatch.setattr(rr.sqlite3, "connect", boom)
+    with pytest.raises(rr.RegistryReadError) as exc:
+        rr.open_readonly(str(tmp_path / "youtube-uploads.json"))
+    assert not isinstance(exc.value, rr.RegistryReadBusy) and len(calls) == rr.ATTEMPTS
+
+
+def test_open_readonly_an_unrecognised_operational_error_is_not_busy(tmp_path, monkeypatch):
+    upload_registry.Registry(str(tmp_path / "youtube-uploads.json")).close()
+
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("qualcosa di inatteso")
+    monkeypatch.setattr(rr.sqlite3, "connect", boom)
+    with pytest.raises(rr.RegistryReadError) as exc:
+        rr.open_readonly(str(tmp_path / "youtube-uploads.json"))
+    assert not isinstance(exc.value, rr.RegistryReadBusy)
+
+
+def test_open_readonly_a_persistent_lock_is_busy(tmp_path, monkeypatch):
+    upload_registry.Registry(str(tmp_path / "youtube-uploads.json")).close()
+
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(rr.sqlite3, "connect", boom)
+    with pytest.raises(rr.RegistryReadBusy):
+        rr.open_readonly(str(tmp_path / "youtube-uploads.json"))
+
+
+@pytest.mark.parametrize("folder", ["con?punto", "con#cancelletto", "con%20percento", "con spazio"])
+def test_paths_with_uri_reserved_characters_open_the_right_database(tmp_path, folder):
+    d = tmp_path / folder
+    d.mkdir()
+    reg = upload_registry.Registry(str(d / "youtube-uploads.json"))
+    reg.confirm("k", external_id="v", videoId="v")
+    reg.close()
+    assert "k" in rr.read_records(str(d / "youtube-uploads.json"))
+    conn = rr.open_readonly(str(d / "youtube-uploads.json"))
+    try:
+        assert "k" in rr.read_records_from_connection(conn, "youtube")
+    finally:
+        conn.close()
